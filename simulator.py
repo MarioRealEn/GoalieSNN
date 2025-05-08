@@ -770,29 +770,6 @@ class Camera():
         v = int(self.img_height / 2 - y_proj)  # Invert y-axis for image coordinates
         return np.array([u, v]), cam_point[1]
     
-    def project_point_to_world_old(self, pixel_coords, depth, camera_coords_flag = False):
-        """
-        Projects 2D pixel coordinates back to 3D world coordinates using the inverse of the camera transformation.
-        """
-        u, v = pixel_coords
-        # Convert pixel coordinates to normalized image coordinates:
-        x_norm = (u - self.img_width / 2) / self.focal_length
-        y_norm = (v - self.img_height / 2) / self.focal_length
-        # Compute the homogeneous coordinates in camera space:
-        cam_point_hom = np.array([x_norm * depth, depth, y_norm * depth, 1])
-        if camera_coords_flag:
-            return cam_point_hom[:3]  # Return in camera coordinates
-        # Transform back to world coordinates:
-        world_point_hom = cam_point_hom.dot(self.T_inv)
-        return world_point_hom[:3]
-    
-    def project_ball_camera_to_world_old(self, camera_coords, camera_coords_flag = False):
-
-        x_cam, y_cam, R_cam = camera_coords
-        depth = self.get_depth(BALL_RADIUS, R_cam)
-        world_point = self.project_point_to_world([x_cam, y_cam], depth, camera_coords_flag = camera_coords_flag)
-        return world_point
-    
     def project_point_to_world(self, pixel_coords, depth, camera_coords_flag=False):
         """
         Projects 2D pixel coords + depth back to 3D world coords.
