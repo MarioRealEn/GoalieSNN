@@ -19,6 +19,7 @@ from simulator import BALL_RADIUS, Camera, Field
 
 MAX_VAL_R_CAM = dt.MAX_VAL_R_CAM
 MAX_VAL_Y_CAM = dt.MAX_VAL_Y_CAM
+MAX_VAL_Y_CAM = 720
 BALL_RADIUS = BALL_RADIUS
 CHUNK_SIZE = 40
 
@@ -179,14 +180,15 @@ class SCNN_Tracker2L(nn.Module):
     def evaluate(self, testloader, device, num_steps, print_results=False):
         return evaluate_classification_tracker(self, testloader, device, num_steps, print_results)
 
-class SCNN_Tracker3L(nn.Module):
+class SCNNImageClassification(nn.Module):
     def __init__(self, image_shape, bins_factor, beta=0.8, learn_threshold = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNN_Tracker3L, self).__init__()
+        super(SCNNImageClassification, self).__init__()
 
-        self.model_type = 'Tracker3L'
+        self.model_type = 'ImageClassification'
+        self.task = 'classification'
         self.beta = beta
         self.learn_threshold = learn_threshold
         self.image_shape = image_shape
@@ -312,14 +314,15 @@ class SCNN_Tracker3L(nn.Module):
     def evaluate(self, testloader, device, num_steps, print_results=False):
         return evaluate_classification_tracker(self, testloader, device, num_steps, print_results)
 
-class SCNN_Tracker3LWAvg(nn.Module):
+class SCNNImageClassWAvg(nn.Module):
     def __init__(self, image_shape, bins_factor, beta=0.8, learn_threshold = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNN_Tracker3LWAvg, self).__init__()
+        super(SCNNImageClassWAvg, self).__init__()
 
-        self.model_type = 'Tracker3LWAvg'
+        self.name = 'ImageClassWAvg'
+        self.task = 'classification'
         self.beta = beta
         self.learn_threshold = learn_threshold
         self.image_shape = image_shape
@@ -456,7 +459,7 @@ class SCNN_Tracker3LWAvg(nn.Module):
         batch_size = trainloader.batch_size
         loss_function = regression_loss
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -474,14 +477,15 @@ class SCNN_Tracker3LWAvg(nn.Module):
     def evaluate(self, testloader, device, num_steps, print_results=False):
         return evaluate_regression_tracker(self, testloader, device, num_steps, print_results)
 
-class SCNN_TrackerRegression(nn.Module):
+class SCNNImageRegression(nn.Module):
     def __init__(self, image_shape, beta=0.8, learn_threshold = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNN_TrackerRegression, self).__init__()
+        super(SCNNImageRegression, self).__init__()
 
-        self.model_type = 'TrackerRegression'
+        self.name = 'ImageRegression'
+        self.task = 'regression'
         self.beta = beta
         self.learn_threshold = learn_threshold
         self.image_shape = image_shape
@@ -586,17 +590,13 @@ class SCNN_TrackerRegression(nn.Module):
         # Average over time steps
         outputs_x = outputs_x / num_steps
         outputs_y = outputs_y / num_steps
-        
-        # Apply sigmoid to obtain normalized coordinates between 0 and 1.
-        norm_x = torch.sigmoid(outputs_x)
-        norm_y = torch.sigmoid(outputs_y)
             
-        return norm_x, norm_y#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
+        return outputs_x, outputs_y#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
     
     def start_training(self, trainloader, optimizer, device, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
         loss_function = regression_loss
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": trainloader.batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -744,14 +744,15 @@ class SCNN_Tracker_Class_GASP(nn.Module): # Three conv layers
     def evaluate(self, testloader, device, num_steps, print_results=False):
         return evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results)
     
-class SCNN_Video_Tracker_Class(nn.Module): # Based on the SCNN_Tracker3L
+class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
     def __init__(self, trainset, beta=0.8, learn_threshold = False, weighted_avg = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNN_Video_Tracker_Class, self).__init__()
+        super(SCNNVideoClassification, self).__init__()
 
-        self.model_type = 'VideoTrackerClass'
+        self.name = 'VideoClassification'
+        self.task = 'classification'
         self.beta = beta
         self.learn_threshold = learn_threshold
         self.image_shape = trainset.image_shape
@@ -760,9 +761,10 @@ class SCNN_Video_Tracker_Class(nn.Module): # Based on the SCNN_Tracker3L
         self.g = 9.81  # Gravitational constant for the simulation
         self.dt = 0.01  # Time step for the simulation
         self.max_values = {
-            'x_cam': self.image_shape[2],
-            'y_cam': MAX_VAL_Y_CAM,
-            'R_cam': MAX_VAL_R_CAM
+            'x_cam': int(self.image_shape[2]*self.bins_factor) + 1,
+            'y_cam': MAX_VAL_Y_CAM//trainset.label_quantization + 1,
+            'R_cam': MAX_VAL_R_CAM//trainset.label_quantization + 1,
+            'in_fov': 1,
         }
         self.n_bins = np.ones(len(trainset.labels), dtype=int)
         self.labels = trainset.labels
@@ -791,7 +793,7 @@ class SCNN_Video_Tracker_Class(nn.Module): # Based on the SCNN_Tracker3L
         self.lif_layers = nn.ModuleDict()
         
         for i, label in enumerate(trainset.labels):
-            n_bins = int(self.max_values[label] * self.bins_factor)
+            n_bins = self.max_values[label]
             self.n_bins[i] = n_bins
             self.fc_layers[label] = nn.Linear(self.flattened_size, n_bins)
             self.lif_layers[label] = snn.Leaky(beta, learn_threshold=learn_threshold)
@@ -882,15 +884,16 @@ class SCNN_Video_Tracker_Class(nn.Module): # Based on the SCNN_Tracker3L
         
         return outputs_seq#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
     
-    def start_training(self, trainloader, optimizer, device, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
+    def start_training(self, trainloader, optimizer, device, loss_function = None, validationloader = None, num_steps = 10, num_epochs=20, plot = True, chunk_size = CHUNK_SIZE, save = []):
         batch_size = trainloader.batch_size
-        if self.weighted_avg:
-            loss_function = regression_loss
-        else: 
-            loss_function = classification_loss
+        if loss_function is None:
+            if self.weighted_avg:
+                loss_function = regression_loss
+            else: 
+                loss_function = classification_loss
 
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -905,20 +908,23 @@ class SCNN_Video_Tracker_Class(nn.Module): # Based on the SCNN_Tracker3L
             "weighted_avg": self.weighted_avg,
             }
         
-        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot)
+        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot, save=save, chunk_size=chunk_size)
     
-    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean'):
-        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation) if self.weighted_avg else evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results, operation)
+    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', weighted_avg = None):
+        if weighted_avg is None:
+            weighted_avg = getattr(self, "weighted_avg", False)
+        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, weighted_avg=weighted_avg) if self.weighted_avg else evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results, operation)
 
 
-class PISNN(nn.Module): # Based on the SCNN_Tracker3L
+class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
     def __init__(self, trainset, beta=0.8, learn_threshold = False, weighted_avg = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(PISNN, self).__init__()
+        super(SCNNVideoRegression, self).__init__()
 
-        self.model_type = 'PISNN'
+        self.name = 'VideoRegression'
+        self.task = 'regression'
         self.beta = beta
         self.learn_threshold = learn_threshold
         self.image_shape = trainset.image_shape
@@ -927,14 +933,14 @@ class PISNN(nn.Module): # Based on the SCNN_Tracker3L
         self.g = 9.81  # Gravitational acceleration in m/s^2
         self.dt = 0.01  # Time step in seconds (adjust as needed)
         self.max_values = {
-            'x_cam': self.image_shape[2],
-            'y_cam': MAX_VAL_Y_CAM,
-            'R_cam': MAX_VAL_R_CAM
+            'x_cam': int(self.image_shape[2]*self.bins_factor),
+            'y_cam': MAX_VAL_Y_CAM//trainset.label_quantization,
+            'R_cam': MAX_VAL_R_CAM//trainset.label_quantization,
+            'in_fov': 1,
         }
 
         # Convolutional layers (assuming 2-channel input for polarity split)
         channels, y_pixels, x_pixels = self.image_shape
-        x_bins, y_bins = int(x_pixels*self.bins_factor), int(y_pixels*self.bins_factor)
 
         input_shape = (channels, y_pixels, x_pixels)
         self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=1, padding=2)   # Expected: from (2, H, W) to (16, H/2, W/2)
@@ -1038,24 +1044,20 @@ class PISNN(nn.Module): # Based on the SCNN_Tracker3L
             outputs_y = outputs_y / num_steps_per_image
             outputs_z = outputs_z / num_steps_per_image
 
-            norm_x = torch.sigmoid(outputs_x)
-            norm_y = torch.sigmoid(outputs_y)
-            norm_z = torch.sigmoid(outputs_z)
-
             # print('Outputs x and valid mask', outputs_x.shape, valid_mask.shape)
 
-            outputs_seq_x[valid_mask, :, i] = norm_x
-            outputs_seq_y[valid_mask, :, i] = norm_y
-            outputs_seq_z[valid_mask, :, i] = norm_z
+            outputs_seq_x[valid_mask, :, i] = outputs_x
+            outputs_seq_y[valid_mask, :, i] = outputs_y
+            outputs_seq_z[valid_mask, :, i] = outputs_z
 
         
         return outputs_seq_x, outputs_seq_y, outputs_seq_z
     
-    def start_training(self, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
+    def start_training(self, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, plot = True, chunk_size=CHUNK_SIZE, save = []):
         batch_size = trainloader.batch_size
 
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -1070,10 +1072,186 @@ class PISNN(nn.Module): # Based on the SCNN_Tracker3L
             "weighted_avg": self.weighted_avg,
             }
         
-        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot)
+        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot, chunk_size=chunk_size, save=save)
     
-    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean'):
-        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation)
+    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', chunk_size=CHUNK_SIZE):
+        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, chunk_size=chunk_size)
+
+
+class SCNNVideoClassWConfidence(nn.Module): # Based on the SCNN_Tracker3L
+    def __init__(self, trainset, beta=0.8, learn_threshold = False, weighted_avg = False):
+        """
+        input_shape: tuple (channels, height, width) of input event data.
+        """
+        super(SCNNVideoClassWConfidence, self).__init__()
+
+        self.name = 'VideoClassWConfidence'
+        self.task = 'classification'
+        self.beta = beta
+        self.learn_threshold = learn_threshold
+        self.image_shape = trainset.image_shape
+        self.bins_factor = trainset.quantization / trainset.label_quantization
+        self.weighted_avg = weighted_avg
+        self.g = 9.81  # Gravitational constant for the simulation
+        self.dt = 0.01  # Time step for the simulation
+        self.max_values = {
+            'x_cam': int(self.image_shape[2]*self.bins_factor),
+            'y_cam': MAX_VAL_Y_CAM//trainset.label_quantization,
+            'R_cam': MAX_VAL_R_CAM//trainset.label_quantization,
+            'in_fov': 1,
+        }
+        self.n_bins = np.ones(len(trainset.labels), dtype=int)
+        self.labels = trainset.labels
+
+        # Convolutional layers (assuming 2-channel input for polarity split)
+        channels, y_pixels, x_pixels = self.image_shape
+
+        input_shape = (channels, y_pixels, x_pixels)
+        self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=1, padding=2)   # Expected: from (2, H, W) to (16, H/2, W/2)
+        self.lif1 = snn.Leaky(beta, learn_threshold=learn_threshold)
+        self.mp1 = nn.MaxPool2d(2)
+
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)  # Expected: (32, H/4, W/4)
+        self.lif2 = snn.Leaky(beta, learn_threshold=learn_threshold)
+        self.mp2 = nn.MaxPool2d(2)
+
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)  # Expected: (64, H/8, W/8)
+        self.lif3 = snn.Leaky(beta, learn_threshold=learn_threshold)
+        self.mp3 = nn.MaxPool2d(2)
+
+        # Dynamically compute the flattened feature size by passing a dummy input.
+        self.flattened_size = self._get_flattened_size(input_shape)
+        print(f"Flattened feature size: {self.flattened_size}")
+
+        self.fc_layers = nn.ModuleDict()
+        self.lif_layers = nn.ModuleDict()
+        
+        for i, label in enumerate(trainset.labels):
+            n_bins = self.max_values[label]
+            self.n_bins[i] = n_bins
+            self.fc_layers[label] = nn.Linear(self.flattened_size, n_bins)
+            self.lif_layers[label] = snn.Leaky(beta, learn_threshold=learn_threshold)
+            print(f"Number of {label} bins: {n_bins}")
+
+        self.fc_layers['confidence'] = nn.Linear(self.flattened_size, 1)
+        self.lif_layers['confidence'] = snn.Leaky(beta, learn_threshold=learn_threshold)
+            
+
+
+    def _get_flattened_size(self, input_shape):
+        # Create a dummy input tensor with the given shape.
+        with torch.no_grad():
+            x = torch.zeros(1, *input_shape)
+            x = self.conv1(x)
+            x = self.mp1(x)
+            x = self.conv2(x)
+            x = self.mp2(x)
+            x = self.conv3(x)
+            x = self.mp3(x)
+            flattened_size = x.view(1, -1).size(1)
+        return flattened_size
+
+    def forward(self, sequences_lengths, num_steps_per_image=10):
+        """
+        x: input tensor of shape [batch, channels, height, width]
+        num_steps: number of simulation time steps (simulate repeated evaluation to mimic spiking dynamics)
+        """
+
+        padded_x, lengths = sequences_lengths
+        batch_size, max_seq_len = padded_x.shape[:2]
+
+        # # Initialize hidden states
+        mem1 = self.lif1.init_leaky()
+        mem2 = self.lif2.init_leaky()
+        mem3 = self.lif3.init_leaky()
+
+        # Record final layer
+        # Initialize tensors to store outputs for each time step per sequence.
+        outputs_seq = []
+        for i in range(len(self.labels)):
+            outputs_seq.append(torch.zeros(batch_size, self.n_bins[i], max_seq_len, device=padded_x.device))
+
+        for i in range(max_seq_len):
+            # Create a boolean mask for samples that have a valid image at time t
+            valid_mask = (i < lengths).to(padded_x.device)
+            if valid_mask.sum() == 0:
+                break  # No valid data at this time step for any sequence
+
+            # Get the images for the valid sequences at time t (shape: [valid_batch, channels, height, width])
+            x_t = padded_x[valid_mask, i]
+
+            outputs = []
+            for label in self.labels:
+                outputs.append(torch.zeros(x_t.size(0), self.max_values[label], device=padded_x.device))
+
+            for step in range(num_steps_per_image):
+                # Convolutional layers with spiking activations
+                x1 = self.conv1(x_t)
+                spk1, mem1 = self.lif1(self.mp1(x1), mem1)
+                
+                x2 = self.conv2(spk1)
+                spk2, mem2 = self.lif2(self.mp2(x2), mem2)
+                
+                x3 = self.conv3(spk2)
+                spk3, mem3 = self.lif3(self.mp3(x3), mem3)
+
+                
+                # Flatten features
+                s3_flat = spk3.view(spk3.size(0), -1)
+                
+                for j, label in enumerate(self.labels):
+                    fc_out = self.fc_layers[label](s3_flat)
+                    # spk_out, _ = self.lif_layers[label](fc_out)
+                    outputs[j] += fc_out
+
+                # Delete intermediate tensors
+                del x1, spk1, x2, spk2, x3, spk3, s3_flat
+            if padded_x.device == "cuda": torch.cuda.empty_cache()
+            # Average over time steps
+            for j in range(len(self.labels)):
+                outputs[j] = outputs[j] / num_steps_per_image
+                outputs_seq[j][valid_mask, :, i] = outputs[j]
+
+            # print('Outputs x and valid mask', outputs_x.shape, valid_mask.shape)
+
+        
+        # Apply softmax to get probabilities
+        # probs_x = F.softmax(outputs_x, dim=1)
+        # probs_y = F.softmax(outputs_y, dim=1)
+        
+        return outputs_seq#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
+    
+    def start_training(self, trainloader, optimizer, device, loss_function = None, validationloader = None, num_steps = 10, num_epochs=20, plot = True, chunk_size=CHUNK_SIZE, save = []):
+        batch_size = trainloader.batch_size
+        if loss_function is None:
+            if self.weighted_avg:
+                loss_function = regression_loss
+            else: 
+                loss_function = classification_loss
+
+        self.training_params = {
+            "type": self.name,
+            "batch_size": batch_size,
+            "num_steps": num_steps,
+            "loss_function": loss_function.__name__,
+            "optimizer": optimizer,
+            "learning_rate": optimizer.param_groups[0]['lr'],
+            "num_epochs": 0,
+            "quantization": trainloader.dataset.quantization,
+            "label_quantization": trainloader.dataset.label_quantization,
+            "beta": self.beta,
+            "learn_threshold": self.learn_threshold,
+            "image_shape": self.image_shape,
+            "weighted_avg": self.weighted_avg,
+            }
+        
+        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot, chunk_size=chunk_size)
+    
+    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', weighted_avg = None, chunk_size=CHUNK_SIZE):
+        if weighted_avg is None:
+            weighted_avg = getattr(self, "weighted_avg", False)
+        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, weighted_avg=weighted_avg, chunk_size=chunk_size) if self.weighted_avg else evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results, operation)
+
 
 
 def training_loop_images(model, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
@@ -1131,7 +1309,7 @@ def training_loop_images(model, trainloader, optimizer, device, loss_function, v
 
 
 def training_loop_videos(model, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, plot = True,
-                         chunk_size=CHUNK_SIZE):
+                         chunk_size=CHUNK_SIZE, save = []):
     epoch_losses = []
     validation_errors = []
     max_values = [model.max_values[label] for label in trainloader.dataset.labels]
@@ -1162,6 +1340,7 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
 
                 # forward pass on just this chunk
                 logits = model((imgs_chunk, lengths), num_steps_per_image=num_steps)
+
                 loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values)
 
 
@@ -1180,9 +1359,11 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
         avg_loss = epoch_loss / trainloader.dataset.return_n_frames()
         epoch_losses.append(avg_loss)
         model.training_params["num_epochs"] += 1
+        if epoch in save:
+            save_model(model)
 
         if validationloader is not None:
-            error = model.evaluate(validationloader, device, num_steps, print_results=False)
+            error = model.evaluate(validationloader, device, num_steps, print_results=True)
             error = np.linalg.norm(error).item()
             validation_errors.append(error)
             print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}, Validation Error: {error:.4f} pixels")
@@ -1212,13 +1393,13 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
 ########################################################################        
 
 
-def classification_loss(model, logits, labels, max_values = None, mask = None): # Max_values is not used here, but it is used in the regression loss
+def classification_loss(model, outputs, labels, max_values = None, mask = None): # Max_values is not used here, but it is used in the regression loss
     criterion = nn.CrossEntropyLoss()
     total_loss = 0
     if mask == None:
         # loss_x = criterion(logits_x, labels_x.round().long())
         # loss_y = criterion(logits_y, labels_y.round().long())
-        for i, logit in enumerate(logits):
+        for i, logit in enumerate(outputs):
             loss = criterion(logit, labels[:,i].round().long())
             total_loss += loss
         del loss, logit
@@ -1227,10 +1408,12 @@ def classification_loss(model, logits, labels, max_values = None, mask = None): 
         # Create a mask: for each sequence in the batch, valid if t < length
         # The mask will have shape [batch, max_seq_length]
         # mask = torch.arange(max_seq_length, device=logits[0].device).expand(batch, max_seq_length) < lengths.unsqueeze(1)              # [batch * max_seq_length]
-        for i, logit in enumerate(logits):
+        for i, logit in enumerate(outputs):
             labels_valid = labels[mask][:, i]
+            # print(labels_valid.max(), labels_valid.min())
             logit = logit.transpose(2, 1)
             logit_valid = logit[mask]
+            # print(logit_valid.shape)
             loss = criterion(logit_valid, labels_valid.round().long())
             total_loss += loss
         del logit, labels_valid, logit_valid, loss
@@ -1265,7 +1448,7 @@ def pinn_loss(model,
               outputs,             # what your model returns for this chunk
               labels,             # labels_chunk: shape [B, chunk_len, 3]
               mask,               # valid_mask: shape [B, chunk_len]
-              max_values=None):   # passed in but not needed here
+              max_values=None):
 
     """
     Physics‐Informed 3D loss for one chunk, given:
@@ -1273,9 +1456,18 @@ def pinn_loss(model,
       - logits: tuple (preds_x, preds_y, preds_z), each [B, chunk_len]
       - labels: tensor [B, chunk_len, 3]  (columns: x,y,z)
       - mask:   boolean tensor [B, chunk_len] marking real frames
-      - max_values: ignored here (only needed for other losses)
+      - max_values: max values for each dimension
     """
-    preds = [(o * m).squeeze() for o, m in zip(outputs, max_values)]
+    if model.task == 'regression':
+        preds = [(o * m).squeeze() for o, m in zip(outputs, max_values)]
+    elif model.task == 'classification':
+        if getattr(model, "weighted_avg", False):
+            preds = logits_to_weighted_avg(outputs)
+        else:
+            preds = [torch.argmax(o, dim=1) for o in outputs]
+    else:
+        raise ValueError("Invalid task type. Expected 'regression' or 'classification'.")
+    # print('Preds', preds[0].shape)
     B, chunk_len = preds[0].shape
 
     # This is supposed to be the same as below. This is left for readability purposes.
@@ -1345,8 +1537,48 @@ def pinn_loss(model,
     r_r        = contact #+ friction_x + friction_y
 
     L_phys = torch.mean(s_f * r_f + s_r * r_r)
+    C = 0.000005
+    # print('L_phys', C*L_phys.item(), 'L_data', L_data.item())
 
-    return L_data + L_phys
+    return L_data + C * L_phys
+
+def classification_loss_w_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = True, alpha = 10): # Max_values is not used here, but it is used in the regression loss
+    criterion_class = nn.CrossEntropyLoss()
+    criterion_regression = nn.BCEWithLogitsLoss()
+    conf_labels = labels[:, :, -1]
+    conf_outputs = outputs[-1].squeeze(1)
+    conf_outputs_sig = torch.sigmoid(conf_outputs)
+    outputs = outputs[:-1]
+    labels = labels[:, :, :-1]
+    cls_loss = 0
+    if mask is None:
+        loss_conf = criterion_regression(conf_outputs, conf_labels)
+        for i, logit in enumerate(outputs):
+            loss = criterion_class(logit, labels[:,i].round().long())
+            cls_loss += loss
+        total_loss = alpha * loss_conf + conf_outputs_sig * cls_loss.mean()
+    else:
+        conf_labels_valid = conf_labels[mask]
+        conf_outputs_valid = conf_outputs[mask]
+        loss_conf = criterion_regression(conf_outputs_valid, conf_labels_valid)
+        gate = conf_outputs_sig[mask] if gate_by_pred else conf_labels.squeeze(1)[mask]  # (B,)
+        for i, logit in enumerate(outputs):
+            labels_valid = labels[mask][:, i].round().long()
+            logit = logit.transpose(2, 1)
+            logit_valid = logit[mask]
+            loss = F.cross_entropy(
+                logit_valid,
+                labels_valid,
+                reduction='none'
+            )
+            # print('Loss', loss.mean(), gate.mean())
+            cls_loss += gate * loss
+        cls_loss = cls_loss.mean()
+        loss_conf = alpha * loss_conf
+        # print('Loss conf', loss_conf.item(), 'cls_loss', cls_loss.item())
+        total_loss = loss_conf + cls_loss
+    del logit, labels_valid, logit_valid, loss_conf, cls_loss, conf_labels_valid, conf_outputs_valid, gate, loss, conf_labels, conf_outputs
+    return total_loss
 
 
 def logits_to_weighted_avg(logits):
@@ -1477,57 +1709,56 @@ def evaluate_classification_tracker(model, testloader, device, num_steps=10, pri
             plot_error_distribution(all_errors_x, all_errors_y)
             return all_errors_x, all_errors_y
 
-def evaluate_video_classification_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean"):
+def evaluate_video_classification_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=CHUNK_SIZE):
     model.eval()  # Set model to evaluation mode
 
-    all_errors_x = np.array([])
-    all_errors_y = np.array([])
-
+    all_errors = [[] for _ in range(len(testloader.dataset.labels))]
+        
     with torch.no_grad():
         for padded_imgs, padded_labels, lengths in testloader:
-            # Sort the batch by sequence lengths in descending order
-            lengths, sorted_indices = lengths.sort(descending=True)
-            lengths = lengths.to(device)
-            padded_imgs = padded_imgs[sorted_indices].to(device)
-            padded_labels = padded_labels[sorted_indices]
-            # Use only x and y coordinates for classification.
-            labels_x = padded_labels[:, :, 0].round().long().to(device)
-            labels_y = padded_labels[:, :, 1].round().long().to(device)
+            # Move everything to device once
+            padded_imgs   = padded_imgs.to(device)   # [B, T, C, H, W]
+            padded_labels = padded_labels.round().long().to(device)
+            lengths       = lengths.to(device)       # [B]
             
-            probs_x, probs_y = model((padded_imgs, lengths), num_steps_per_image=num_steps)
-            
-            batch, num_classes_x, max_seq_length = probs_x.shape
+            # iterate over each chunk of the sequence
+            T = padded_imgs.size(1)
+            for t0 in range(0, T, chunk_size):
+                t1 = min(t0 + chunk_size, T)
+                imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
+                labels_chunk = padded_labels[:, t0:t1] # [B, chunk, …]
+                # adjust lengths for this chunk
+                # mask out frames ≥ original length
+                frame_idx = torch.arange(t0, t1, device=device).unsqueeze(0)  # [1, chunk]
+                valid_mask = frame_idx < lengths.unsqueeze(1)                  # [B, chunk]
 
-            # Create a mask: for each sequence in the batch, valid if t < length
-            # The mask will have shape [batch, max_seq_length]
-            mask = torch.arange(max_seq_length, device=probs_x.device).expand(batch, max_seq_length) < lengths.unsqueeze(1)              # [batch * max_seq_length]
-            labels_x_valid = labels_x[mask]
-            labels_y_valid = labels_y[mask]
-            probs_x = probs_x.transpose(2, 1)
-            probs_y = probs_y.transpose(2, 1)
-            probs_x_valid = probs_x[mask, :]
-            probs_y_valid = probs_y[mask, :]
-            # Use argmax to get the predicted bin (x and y coordinates)
-            preds_x = torch.argmax(probs_x_valid, dim=1)
-            preds_y = torch.argmax(probs_y_valid, dim=1)
-            
-            # Compute absolute error per sample
-            error_x = torch.abs(preds_x.float() - labels_x_valid.float())
-            error_y = torch.abs(preds_y.float() - labels_y_valid.float())
+                # forward pass on just this chunk
+                outputs = model((imgs_chunk, lengths), num_steps_per_image=num_steps)
 
-            all_errors_x = np.concatenate((all_errors_x, error_x.cpu().numpy()))
-            all_errors_y = np.concatenate((all_errors_y, error_y.cpu().numpy()))
+                labels_valid = labels_chunk[valid_mask]
+                for i, output in enumerate(outputs):
+                    output = output.transpose(2, 1)
+                    output_valid = output[valid_mask]
+                    pred = torch.argmax(output_valid, dim=1)
+                    errors = torch.abs(pred.squeeze(-1) - labels_valid[:, i])
+                    # print('Errors', errors.shape)
+                    all_errors[i].extend(errors.cpu().tolist())
+                del outputs, labels_valid, errors, imgs_chunk, labels_chunk, valid_mask, output, pred
+
+            torch.cuda.empty_cache()
         if operation == "mean":
-            avg_error_x = np.mean(all_errors_x)
-            avg_error_y = np.mean(all_errors_y)
-            if print_results: print(f"Average X Error: {avg_error_x:.4f} pixels, Average Y Error: {avg_error_y:.4f} pixels")
-            return avg_error_x, avg_error_y
+            avg_error_all_labels = []
+            print('All errors', len(all_errors))
+            for i, label in enumerate(testloader.dataset.labels):
+                avg_error = np.mean(all_errors[i])
+                avg_error_all_labels.append(avg_error)
+                if print_results: print(f"Average Error for {label}: {avg_error:.4f} pixels")
         elif operation == "distribution":
             plot_error_distribution(all_errors_x, all_errors_y)
-            return all_errors_x, all_errors_y
+        return np.array(avg_error_all_labels)
         
 
-def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean"):
+def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", weighted_avg=False):
         """
         Evaluate the model on the testset.
         
@@ -1554,6 +1785,8 @@ def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_r
                 
                 # Get model outputs (raw logits for x and y)
                 norm_x, norm_y = model(images, num_steps=num_steps)
+                if weighted_avg:
+                    norm_x, norm_y = logits_to_weighted_avg((norm_x, norm_y))
                 height, width = model.input_shape[1], model.input_shape[2]
                 preds_x = (norm_x * width).squeeze(1)
                 preds_y = (norm_y * height).squeeze(1)
@@ -1570,8 +1803,11 @@ def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_r
         elif operation == "distribution":
             return all_errors_x, all_errors_y
 
-def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=40):
+def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=CHUNK_SIZE, weighted_avg=None):
     model.eval()  # Set model to evaluation mode
+
+    if weighted_avg is None:
+        weighted_avg = getattr(model, "weighted_avg", False)
 
     all_errors = []
     max_values = [model.max_values[label] for label in testloader.dataset.labels]
@@ -1583,11 +1819,8 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
             padded_labels = padded_labels.to(device) # [B, T, …]
             lengths       = lengths.to(device)       # [B]
 
-            total_chunks = 0
-
             # iterate over each chunk of the sequence
             T = padded_imgs.size(1)
-            total_chunks = T // chunk_size + (T % chunk_size > 0)
             for t0 in range(0, T, chunk_size):
                 t1 = min(t0 + chunk_size, T)
                 imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
@@ -1600,13 +1833,15 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
                 # forward pass on just this chunk
                 outputs = model((imgs_chunk, lengths), num_steps_per_image=num_steps)
 
-                if getattr(model, "weighted_avg", False) is True:
+                if weighted_avg:
                     outputs = logits_to_weighted_avg(outputs)
+                else:
+                    outputs = [o.squeeze() for o in outputs]
+                # Now outputs is a list of tensors, each of shape [B, chunk_len]
                 for i, (output, max_value) in enumerate(zip(outputs, max_values)):
                     labels_valid = labels_chunk[:, :, i][valid_mask]
-                    output = output.transpose(2, 1)
                     output_valid = output[valid_mask] * max_value
-                    errors = torch.abs(output_valid.squeeze(-1) - labels_valid)
+                    errors = torch.abs(output_valid - labels_valid)
                     all_errors.extend(errors.cpu().numpy())
                 del output, labels_valid, output_valid, max_value, errors, imgs_chunk, labels_chunk, outputs, valid_mask
 
@@ -1622,7 +1857,7 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
         return np.array(avg_error_all_labels)
 
 
-def plot_timestep_curve(model, testloader, device, identifier="", regression=False, interval = [1, 100, 5]):
+def plot_timestep_curve(model, testloader, device, identifier="", interval = [1, 100, 5]):
     errors = []
     timesteps = []
     for i in range(*interval):
@@ -1643,10 +1878,10 @@ def save_model(model, path = None):
     if path == None: 
         if 'weighted_avg' in model.training_params.keys():
             if model.training_params['weighted_avg']: 
-                path = f'models/{model.model_type}WAvg_q{model.training_params["quantization"]}_{model.training_params["num_steps"]}ts_{model.training_params["num_epochs"]}e.pt'
+                path = f'models/{model.name}WAvg_q{model.training_params["quantization"]}_{model.training_params["num_steps"]}ts_{model.training_params["num_epochs"]}e.pt'
             else:
-                path = f'models/{model.model_type}_q{model.training_params["quantization"]}_{model.training_params["num_steps"]}ts_{model.training_params["num_epochs"]}e.pt'
-        else: path = f'models/{model.model_type}_q{model.training_params["quantization"]}_{model.training_params["num_steps"]}ts_{model.training_params["num_epochs"]}e.pt'
+                path = f'models/{model.name}_q{model.training_params["quantization"]}_{model.training_params["num_steps"]}ts_{model.training_params["num_epochs"]}e.pt'
+        else: path = f'models/{model.name}_q{model.training_params["quantization"]}_{model.training_params["num_steps"]}ts_{model.training_params["num_epochs"]}e.pt'
     torch.save({
         'model_state_dict': model.state_dict(),
         'training_params': model.training_params,
@@ -1744,7 +1979,8 @@ def load_model(path, model_class, trainset, device):
     checkpoint = torch.load(path)
     # Create model instance with the same parameters as the saved model
     if checkpoint['training_params'].keys().__contains__('weighted_avg'):
-        model = model_class(trainset, weighted_avg=True)
+        print(f"Loading model with weighted average: {checkpoint['training_params']['weighted_avg']}")
+        model = model_class(trainset, weighted_avg=checkpoint['training_params']['weighted_avg'])
     else:
         model = model_class(trainset, weighted_avg=False)
     model.load_state_dict(checkpoint['model_state_dict'])

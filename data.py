@@ -24,8 +24,9 @@ DATASET_PREFIX_MAP = {
         }
 
 ORIGINAL_IMAGE_SHAPE = (1280, 720, 2)  # Original image shape (height, width, channels)
-MAX_VAL_R_CAM = 100
+MAX_VAL_R_CAM = 800
 MAX_VAL_Y_CAM = 1854
+MAX_VAL_Y_CAM = 720
 
 def get_chosen_indices(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = None):
     if dataset_type is not None:    
@@ -170,7 +171,6 @@ class BallTrackingDatasetImages(Dataset):
                 label = torch.tensor([x, y, r], dtype=torch.float32)
             else:
                 label = torch.tensor([x, y, r], dtype=torch.float32)
-            
         return image_tensor, label
 
     def crop_item(self, image, labels):
@@ -638,6 +638,12 @@ class Tracking3DVideoDataset(Dataset):
         labels = []
 
         # 4) Iterate only over the rows you need
+        in_fov_flag = False
+        in_fov = None
+        label_fields = self.labels.copy()
+        if 'in_fov' in label_fields:
+            in_fov_flag = True
+            label_fields.remove('in_fov')
         for _, row in frames_video.iterrows():
             n_frame = int(row["frame"])
             if n_frame < 0 or n_frame >= T:
@@ -651,8 +657,17 @@ class Tracking3DVideoDataset(Dataset):
                 image_tensor, _ = self.crop_item(image_tensor, None)  # assume your crop_item can handle None
 
             # fetch and quantize label
-            raw = np.array([row[l] for l in self.labels])
+            raw = np.array([row[l] for l in label_fields])
             x, y, r = raw // self.label_quantization
+            r = min(max(0, r), MAX_VAL_R_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_R_CAM]
+            y = min(max(0, y), MAX_VAL_Y_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_Y_CAM]
+            # if r > 100:
+            #     print(f"Warning: R value out of bounds for {row['Frame']}, r={r}")
+            #     print(raw)
+            #     print(self.label_quantization)
+            #     print(MAX_VAL_R_CAM)
+            if in_fov_flag: in_fov = row["in_fov"]
+
 
             # apply quantization to image
             if self.quantization > 1:
@@ -681,14 +696,14 @@ class Tracking3DVideoDataset(Dataset):
                 x, y = x_new, y_new
 
             # 6) Build final label tensor
-            label = torch.tensor([x, y, r], dtype=torch.float32)
+            label_vals = [x, y, r, in_fov] if in_fov is not None else [x, y, r]
+            label = torch.tensor(label_vals, dtype=torch.float32)
 
             images.append(image_tensor)
             labels.append(label)
         images = torch.stack(images, dim=0)  # [N_valid, 2, H', W']
-        labels = torch.stack(labels, dim=0)  # [N_valid, 3]
+        labels = torch.stack(labels, dim=0)  # [N_valid, N_labels]
         return images, labels, images.size(0)
-
 
 
 # GENERATORS
@@ -744,7 +759,7 @@ def image_gen_for_video(video, labels, preds = None): # This one just shows the 
         if preds is None: yield idx, img, label, height, width
         else: yield idx, img, label, [preds[i, idx] for i in range(len(preds))], height, width
 
-def get_preds_video(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
+def get_preds_video_regression(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
     """Generator that yields images, labels, and predictions given one sequence of images."""
     model.eval()
     with torch.no_grad():
@@ -752,8 +767,24 @@ def get_preds_video(model, video, length, labels, device, num_steps=20): # This 
         preds = []
         max_values = [model.max_values[label] for label in labels]
         for _, (output, max_val) in enumerate(zip(outputs, max_values)):
+            print(output.shape)
             pred = output * max_val
+            print(pred.shape)
             preds.extend(pred.squeeze(0).cpu().numpy())
+        preds = np.array(preds)
+        print(preds.shape)
+    return preds
+
+def get_preds_video_classification(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
+    model.eval()
+    with torch.no_grad():
+        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
+        preds = []
+        for _, output in enumerate(outputs):
+            print(output.shape)
+            pred = torch.argmax(output, dim=1)
+            print(pred.shape)
+            preds.extend(pred.cpu().numpy())
         preds = np.array(preds)
         print(preds.shape)
     return preds
@@ -801,11 +832,11 @@ def show_next_img_w_pred(gen):
     img_np = tensor_to_image(img)
     plt.figure()
     plt.imshow(img_np, cmap='gray')
-    plt.scatter(label[0], label[1], c='r', label="Ground Truth")
-    plt.scatter(pred[0], pred[1], c='b', label="Prediction")
+    plt.scatter(label[0], height - label[1], c='r', label="Ground Truth")
+    plt.scatter(pred[0], height - pred[1], c='b', label="Prediction")
     if len(pred) > 2: # Draw a circle with radius pred[2] and center (pred[0], pred[1])
-        true_circle = plt.Circle((label[0], label[1]), label[2], color='r', fill=False, label="True Radius")
-        pred_circle = plt.Circle((pred[0], pred[1]), pred[2], color='b', fill=False, label="Pred Radius")
+        true_circle = plt.Circle((label[0], height - label[1]), label[2], color='r', fill=False, label="True Radius")
+        pred_circle = plt.Circle((pred[0], height - pred[1]), pred[2], color='b', fill=False, label="Pred Radius")
         plt.gca().add_artist(true_circle)
         plt.gca().add_artist(pred_circle)
     plt.title(f"Sample {idx}")
@@ -815,5 +846,5 @@ def show_next_img_w_pred(gen):
 def tensor_to_image(img):
     zero_channel = torch.zeros_like(img[0])
     img = torch.cat((img[0].unsqueeze(0), zero_channel.unsqueeze(0), img[1].unsqueeze(0)), dim=0)
-    img_np = img.cpu().numpy().transpose((1,2,0)).astype(np.uint8)*255
+    img_np = (img.cpu().numpy().transpose((1,2,0))*255).astype(np.uint8)
     return img_np
