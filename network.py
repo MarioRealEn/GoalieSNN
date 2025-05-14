@@ -765,6 +765,9 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
             'y_cam': MAX_VAL_Y_CAM//trainset.label_quantization + 1,
             'R_cam': MAX_VAL_R_CAM//trainset.label_quantization + 1,
             'in_fov': 1,
+            'X': int(self.image_shape[2]*self.bins_factor) + 1,
+            'Y': int(self.image_shape[1]*self.bins_factor) + 1,
+            'Radius': MAX_VAL_R_CAM//trainset.label_quantization + 1,
         }
         self.n_bins = np.ones(len(trainset.labels), dtype=int)
         self.labels = trainset.labels
@@ -910,10 +913,10 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
         
         training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot, save=save, chunk_size=chunk_size)
     
-    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', weighted_avg = None):
+    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', weighted_avg = None, chunk_size = CHUNK_SIZE):
         if weighted_avg is None:
             weighted_avg = getattr(self, "weighted_avg", False)
-        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, weighted_avg=weighted_avg) if self.weighted_avg else evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results, operation)
+        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, weighted_avg=weighted_avg) if weighted_avg else evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results, operation, chunk_size=chunk_size)
 
 
 class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
@@ -1076,182 +1079,6 @@ class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
     
     def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', chunk_size=CHUNK_SIZE):
         return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, chunk_size=chunk_size)
-
-
-class SCNNVideoClassWConfidence(nn.Module): # Based on the SCNN_Tracker3L
-    def __init__(self, trainset, beta=0.8, learn_threshold = False, weighted_avg = False):
-        """
-        input_shape: tuple (channels, height, width) of input event data.
-        """
-        super(SCNNVideoClassWConfidence, self).__init__()
-
-        self.name = 'VideoClassWConfidence'
-        self.task = 'classification'
-        self.beta = beta
-        self.learn_threshold = learn_threshold
-        self.image_shape = trainset.image_shape
-        self.bins_factor = trainset.quantization / trainset.label_quantization
-        self.weighted_avg = weighted_avg
-        self.g = 9.81  # Gravitational constant for the simulation
-        self.dt = 0.01  # Time step for the simulation
-        self.max_values = {
-            'x_cam': int(self.image_shape[2]*self.bins_factor),
-            'y_cam': MAX_VAL_Y_CAM//trainset.label_quantization,
-            'R_cam': MAX_VAL_R_CAM//trainset.label_quantization,
-            'in_fov': 1,
-        }
-        self.n_bins = np.ones(len(trainset.labels), dtype=int)
-        self.labels = trainset.labels
-
-        # Convolutional layers (assuming 2-channel input for polarity split)
-        channels, y_pixels, x_pixels = self.image_shape
-
-        input_shape = (channels, y_pixels, x_pixels)
-        self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=1, padding=2)   # Expected: from (2, H, W) to (16, H/2, W/2)
-        self.lif1 = snn.Leaky(beta, learn_threshold=learn_threshold)
-        self.mp1 = nn.MaxPool2d(2)
-
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)  # Expected: (32, H/4, W/4)
-        self.lif2 = snn.Leaky(beta, learn_threshold=learn_threshold)
-        self.mp2 = nn.MaxPool2d(2)
-
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)  # Expected: (64, H/8, W/8)
-        self.lif3 = snn.Leaky(beta, learn_threshold=learn_threshold)
-        self.mp3 = nn.MaxPool2d(2)
-
-        # Dynamically compute the flattened feature size by passing a dummy input.
-        self.flattened_size = self._get_flattened_size(input_shape)
-        print(f"Flattened feature size: {self.flattened_size}")
-
-        self.fc_layers = nn.ModuleDict()
-        self.lif_layers = nn.ModuleDict()
-        
-        for i, label in enumerate(trainset.labels):
-            n_bins = self.max_values[label]
-            self.n_bins[i] = n_bins
-            self.fc_layers[label] = nn.Linear(self.flattened_size, n_bins)
-            self.lif_layers[label] = snn.Leaky(beta, learn_threshold=learn_threshold)
-            print(f"Number of {label} bins: {n_bins}")
-
-        self.fc_layers['confidence'] = nn.Linear(self.flattened_size, 1)
-        self.lif_layers['confidence'] = snn.Leaky(beta, learn_threshold=learn_threshold)
-            
-
-
-    def _get_flattened_size(self, input_shape):
-        # Create a dummy input tensor with the given shape.
-        with torch.no_grad():
-            x = torch.zeros(1, *input_shape)
-            x = self.conv1(x)
-            x = self.mp1(x)
-            x = self.conv2(x)
-            x = self.mp2(x)
-            x = self.conv3(x)
-            x = self.mp3(x)
-            flattened_size = x.view(1, -1).size(1)
-        return flattened_size
-
-    def forward(self, sequences_lengths, num_steps_per_image=10):
-        """
-        x: input tensor of shape [batch, channels, height, width]
-        num_steps: number of simulation time steps (simulate repeated evaluation to mimic spiking dynamics)
-        """
-
-        padded_x, lengths = sequences_lengths
-        batch_size, max_seq_len = padded_x.shape[:2]
-
-        # # Initialize hidden states
-        mem1 = self.lif1.init_leaky()
-        mem2 = self.lif2.init_leaky()
-        mem3 = self.lif3.init_leaky()
-
-        # Record final layer
-        # Initialize tensors to store outputs for each time step per sequence.
-        outputs_seq = []
-        for i in range(len(self.labels)):
-            outputs_seq.append(torch.zeros(batch_size, self.n_bins[i], max_seq_len, device=padded_x.device))
-
-        for i in range(max_seq_len):
-            # Create a boolean mask for samples that have a valid image at time t
-            valid_mask = (i < lengths).to(padded_x.device)
-            if valid_mask.sum() == 0:
-                break  # No valid data at this time step for any sequence
-
-            # Get the images for the valid sequences at time t (shape: [valid_batch, channels, height, width])
-            x_t = padded_x[valid_mask, i]
-
-            outputs = []
-            for label in self.labels:
-                outputs.append(torch.zeros(x_t.size(0), self.max_values[label], device=padded_x.device))
-
-            for step in range(num_steps_per_image):
-                # Convolutional layers with spiking activations
-                x1 = self.conv1(x_t)
-                spk1, mem1 = self.lif1(self.mp1(x1), mem1)
-                
-                x2 = self.conv2(spk1)
-                spk2, mem2 = self.lif2(self.mp2(x2), mem2)
-                
-                x3 = self.conv3(spk2)
-                spk3, mem3 = self.lif3(self.mp3(x3), mem3)
-
-                
-                # Flatten features
-                s3_flat = spk3.view(spk3.size(0), -1)
-                
-                for j, label in enumerate(self.labels):
-                    fc_out = self.fc_layers[label](s3_flat)
-                    # spk_out, _ = self.lif_layers[label](fc_out)
-                    outputs[j] += fc_out
-
-                # Delete intermediate tensors
-                del x1, spk1, x2, spk2, x3, spk3, s3_flat
-            if padded_x.device == "cuda": torch.cuda.empty_cache()
-            # Average over time steps
-            for j in range(len(self.labels)):
-                outputs[j] = outputs[j] / num_steps_per_image
-                outputs_seq[j][valid_mask, :, i] = outputs[j]
-
-            # print('Outputs x and valid mask', outputs_x.shape, valid_mask.shape)
-
-        
-        # Apply softmax to get probabilities
-        # probs_x = F.softmax(outputs_x, dim=1)
-        # probs_y = F.softmax(outputs_y, dim=1)
-        
-        return outputs_seq#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
-    
-    def start_training(self, trainloader, optimizer, device, loss_function = None, validationloader = None, num_steps = 10, num_epochs=20, plot = True, chunk_size=CHUNK_SIZE, save = []):
-        batch_size = trainloader.batch_size
-        if loss_function is None:
-            if self.weighted_avg:
-                loss_function = regression_loss
-            else: 
-                loss_function = classification_loss
-
-        self.training_params = {
-            "type": self.name,
-            "batch_size": batch_size,
-            "num_steps": num_steps,
-            "loss_function": loss_function.__name__,
-            "optimizer": optimizer,
-            "learning_rate": optimizer.param_groups[0]['lr'],
-            "num_epochs": 0,
-            "quantization": trainloader.dataset.quantization,
-            "label_quantization": trainloader.dataset.label_quantization,
-            "beta": self.beta,
-            "learn_threshold": self.learn_threshold,
-            "image_shape": self.image_shape,
-            "weighted_avg": self.weighted_avg,
-            }
-        
-        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot, chunk_size=chunk_size)
-    
-    def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', weighted_avg = None, chunk_size=CHUNK_SIZE):
-        if weighted_avg is None:
-            weighted_avg = getattr(self, "weighted_avg", False)
-        return evaluate_video_regression_tracker(self, testloader, device, num_steps, print_results, operation, weighted_avg=weighted_avg, chunk_size=chunk_size) if self.weighted_avg else evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results, operation)
-
 
 
 def training_loop_images(model, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
@@ -1524,8 +1351,11 @@ def pinn_loss(model,
     z_mid = pos[:, 1:-1, 2][phys_mask]  # (sum(phys_mask),)
 
     eps, k = 0.22, 100.0
-    s_f = torch.sigmoid(k * (z_mid - BALL_RADIUS - eps))
-    s_r = 1 - torch.sigmoid(k * (z_mid - BALL_RADIUS - 0.01))
+    # s_f = torch.sigmoid(k * (z_mid - BALL_RADIUS - eps))
+    s_f = 1
+    # s_r = 1 - torch.sigmoid(k * (z_mid - BALL_RADIUS - 0.01))
+    s_r = 0
+    print('Warning: only flying loss')
 
     # flight residual
     r_f = dd_x**2 + dd_y**2 + (dd_z + model.g)**2
@@ -1537,8 +1367,8 @@ def pinn_loss(model,
     r_r        = contact #+ friction_x + friction_y
 
     L_phys = torch.mean(s_f * r_f + s_r * r_r)
-    C = 0.000005
-    # print('L_phys', C*L_phys.item(), 'L_data', L_data.item())
+    C = 0.1
+    print('L_phys', C*L_phys.item(), 'L_data', L_data.item())
 
     return L_data + C * L_phys
 
@@ -1711,7 +1541,7 @@ def evaluate_classification_tracker(model, testloader, device, num_steps=10, pri
 
 def evaluate_video_classification_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=CHUNK_SIZE):
     model.eval()  # Set model to evaluation mode
-
+    print("Evaluating video classification tracker")
     all_errors = [[] for _ in range(len(testloader.dataset.labels))]
         
     with torch.no_grad():
@@ -1754,7 +1584,7 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                 avg_error_all_labels.append(avg_error)
                 if print_results: print(f"Average Error for {label}: {avg_error:.4f} pixels")
         elif operation == "distribution":
-            plot_error_distribution(all_errors_x, all_errors_y)
+            plot_error_distribution(all_errors)
         return np.array(avg_error_all_labels)
         
 
@@ -1805,7 +1635,7 @@ def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_r
 
 def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=CHUNK_SIZE, weighted_avg=None):
     model.eval()  # Set model to evaluation mode
-
+    print("Evaluating video regression tracker")
     if weighted_avg is None:
         weighted_avg = getattr(model, "weighted_avg", False)
 

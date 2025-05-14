@@ -28,7 +28,7 @@ MAX_VAL_R_CAM = 800
 MAX_VAL_Y_CAM = 1854
 MAX_VAL_Y_CAM = 720
 
-def get_chosen_indices(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = None):
+def get_chosen_indices_frames(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = None):
     if dataset_type is not None:    
         valid_prefixes = DATASET_PREFIX_MAP.get(dataset_type, [])
         if len(valid_prefixes) == 0:
@@ -39,6 +39,42 @@ def get_chosen_indices(data, split, train_ratio, val_ratio, seed, column_name, d
             )
             data = data[mask].reset_index(drop=True)
             print(f"Filtered to {len(data)} rows for dataset type: {dataset_type}")
+
+    total_size = len(data)
+    indices = torch.randperm(total_size, generator=torch.Generator().manual_seed(seed))
+    if split == "all":
+        chosen_indices = indices
+        return chosen_indices
+    train_end = int(train_ratio * total_size)
+    val_end = train_end + int(val_ratio * total_size)
+
+    train_indices = indices[:train_end]
+    val_indices = indices[train_end:val_end]
+    test_indices = indices[val_end:]
+
+    print(f"Split sizes: train={len(train_indices)}, val={len(val_indices)}, test={len(test_indices)}, total={total_size}")
+    assert len(train_indices) + len(val_indices) + len(test_indices) == total_size, \
+        "Split indices do not add up to total size"
+
+    if split == "train":
+        chosen_indices = train_indices
+    elif split == "val":
+        chosen_indices = val_indices
+    elif split == "test":
+        chosen_indices = test_indices
+    else:
+        raise ValueError("split must be 'train', 'val', 'test' or 'all'")
+    return data, chosen_indices
+
+def get_chosen_indices_videos(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = None):
+    if dataset_type == 'throws':
+        data = data[data['is_roll'] == False]
+    elif dataset_type == 'rolls':
+        data = data[data['is_roll'] == True]
+    elif dataset_type == 'all':
+        pass
+    else:
+        raise ValueError("dataset_type must be 'throws', 'rolls' or 'all'")
 
     total_size = len(data)
     indices = torch.randperm(total_size, generator=torch.Generator().manual_seed(seed))
@@ -104,7 +140,7 @@ class BallTrackingDatasetImages(Dataset):
         self.data = pd.read_csv(csv_path)
         print(f"Loaded {len(self.data)} rows from {csv_path}")
 
-        self.data, chosen_indices = get_chosen_indices(self.data, split, train_ratio, val_ratio, seed, column_name="Frame", dataset_type=dataset_type)
+        self.data, chosen_indices = get_chosen_indices_frames(self.data, split, train_ratio, val_ratio, seed, column_name="Frame", dataset_type=dataset_type)
 
         self.data = self.data.iloc[chosen_indices].reset_index(drop=True)
         print(f"Final dataset split='{split}' size: {len(self.data)}")
@@ -286,6 +322,7 @@ class BallTrackingDatasetVarLenVideos(Dataset):
         self.crop_margins = crop_margins
         self.slice_type = slice_type
         self.labels = labels
+        self.n_frames = None
         if quantization < 1 or label_quantization < 1:
             raise ValueError("Quantization factors must be >= 1")
         if quantization > 1 and label_quantization == 1:
@@ -307,7 +344,7 @@ class BallTrackingDatasetVarLenVideos(Dataset):
         print(f"Shape of the images: {self.image_shape}")
         print(f"Label shape: {self.label_shape}")
 
-        self.data, chosen_indices = get_chosen_indices(self.data, split, train_ratio, val_ratio, seed, column_name="VideoName", dataset_type=dataset_type)
+        self.data, chosen_indices = get_chosen_indices_frames(self.data, split, train_ratio, val_ratio, seed, column_name="VideoName", dataset_type=dataset_type)
 
         self.data = self.data.iloc[chosen_indices]
         print(f"Final dataset split='{split}' size: {len(self.data)}")
@@ -456,6 +493,16 @@ class BallTrackingDatasetVarLenVideos(Dataset):
         y -= crop_coords[1]
         return np.array([x, y, r])
     
+    def return_n_frames(self):
+        if self.n_frames is None:
+            n_frames = 0
+            for _, video in self.data.iterrows():
+                vid = video['VideoName']
+                pos_tr = self.frames[self.frames['VideoName'] == vid]
+                n_frames += len(pos_tr)
+            self.n_frames = n_frames
+        return self.n_frames
+    
     # Custom collate function for padding sequences in a batch. This is important for variable-length sequences.
     @staticmethod
     def collate_fn(batch):
@@ -511,7 +558,9 @@ class Tracking3DVideoDataset(Dataset):
         self.positions= pd.read_csv(csv_path)
         print(f"Loaded {len(self.positions)} rows from {csv_path}")
         trajectories = self.positions['tr'].unique()
-        self.trajectories = pd.DataFrame(trajectories, columns=['tr'])
+        trajectories_csv = os.path.join(dataset_path, f'trajectories.csv')
+        self.trajectories = pd.read_csv(trajectories_csv)
+        self.trajectories = self.trajectories[self.trajectories['tr'].isin(trajectories)]
         print(f"Found {len(self.trajectories)} sequences in {csv_path}")
 
         self.label_shape = None
@@ -521,7 +570,7 @@ class Tracking3DVideoDataset(Dataset):
         print(f"Shape of the images: {self.image_shape}")
         print(f"Label shape: {self.label_shape}")
 
-        self.trajectories, chosen_indices = get_chosen_indices(self.trajectories, split, train_ratio, val_ratio, seed, column_name="tr", dataset_type=dataset_type)
+        self.trajectories, chosen_indices = get_chosen_indices_videos(self.trajectories, split, train_ratio, val_ratio, seed, column_name="tr", dataset_type=dataset_type)
 
         self.trajectories = self.trajectories.iloc[chosen_indices]
         print(f"Final dataset split='{split}' size: {len(self.trajectories)}")
@@ -658,7 +707,7 @@ class Tracking3DVideoDataset(Dataset):
 
             # fetch and quantize label
             raw = np.array([row[l] for l in label_fields])
-            x, y, r = raw // self.label_quantization
+            x, y, r = raw / self.label_quantization
             r = min(max(0, r), MAX_VAL_R_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_R_CAM]
             y = min(max(0, y), MAX_VAL_Y_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_Y_CAM]
             # if r > 100:
@@ -807,6 +856,9 @@ def show_next_img(gen):
     plt.figure(figsize=(20, 20))
     plt.imshow(img_np, cmap='gray')
     plt.scatter(label[0], height - label[1], c='r', label="Ground Truth")
+    if len(label) > 2: # Draw a circle with radius pred[2] and center (pred[0], pred[1])
+        true_circle = plt.Circle((label[0], height - label[1]), label[2], color='r', fill=False, label="True Radius")
+        plt.gca().add_artist(true_circle)
     plt.title(f"Sample {idx}")
     plt.legend()
     plt.show()
