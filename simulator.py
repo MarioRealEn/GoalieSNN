@@ -793,7 +793,7 @@ class Camera():
             if camera_coords_flag:
                 return cam_h[..., :3]
             # apply inverse transform: world = cam_h @ T_invᵀ
-            Tinv = self.T_inv.to(cam_h.dtype).to(cam_h.device)  # assume T_inv stored as torch or numpy
+            Tinv = self.T_inv  # assume T_inv stored as torch or numpy
             if not isinstance(Tinv, torch.Tensor):
                 Tinv = torch.from_numpy(Tinv).to(cam_h.dtype).to(cam_h.device)
             world_h = cam_h.matmul(Tinv)                       # [...,4]

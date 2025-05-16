@@ -1429,59 +1429,49 @@ def logits_to_weighted_avg(logits):
         weighted_vars.append(weighted_var)
     return weighted_vars
 
-def plot_error_distribution(errors_x, errors_y, n_bins=5):
+def plot_error_distribution(errors, n_bins=5, fields = ['x', 'y', 'R']):
+
+    total_errors = np.linalg.norm(errors, axis=0)
     
-    errors = np.array([errors_x, errors_y])
-    errors = np.linalg.norm(errors, axis=0)
- 
     # Add epsilon to avoid zero values
     epsilon = 1e-9
-    errors_safe = errors + epsilon
-
-    # Fit normal distributions to X/Y errors
-    mu_x, std_x = norm.fit(errors_x)
-    mu_y, std_y = norm.fit(errors_y)
-
-    # Fit Rayleigh distribution to total error
-    rayleigh_params = rayleigh.fit(errors_safe, floc=0)  # Fix location at 0
-    scale_total = rayleigh_params[1]  # Scale parameter (σ) of Rayleigh distribution
-
-    # Calculate 95% confidence intervals
-    confidence_level = 0.95
-    z_score = norm.ppf(confidence_level)  # For normal distributions
-    ci_x = mu_x + z_score * std_x
-    ci_y = mu_y + z_score * std_y
-    ci_total = rayleigh.ppf(confidence_level, scale=scale_total)  # Rayleigh CI
-
-    print(f"X errors: μ={mu_x:.2f}, σ={std_x:.2f}, 95% CI={ci_x:.3f} pixels")
-    print(f"Y errors: μ={mu_y:.2f}, σ={std_y:.2f}, 95% CI={ci_y:.3f} pixels")
-    print(f"Total errors: σ={scale_total:.2f}, 95% CI={ci_total:.3f} pixels")
+    total_errors_safe = total_errors + epsilon
 
     # Create plot
     plt.figure(figsize=(12, 6))
+    # Calculate 95% confidence intervals
+    confidence_level = 0.95
+    z_score = norm.ppf(confidence_level)  # For normal distributions
 
-    # Plot histograms
-    plt.hist(errors_x, bins=n_bins, alpha=0.5, density=True, label='X errors', color='red')
-    plt.hist(errors_y, bins=n_bins, alpha=0.5, density=True, label='Y errors', color='green')
-    plt.hist(errors, bins=n_bins, alpha=0.5, density=True, label='Total errors', color='blue')
+    for i in range(len(errors)):
+        # Fit normal distributions to X/Y errors
+        mu, std = norm.fit(errors[i])
+        ci = mu + z_score * std
+        field = fields[i]
+        print(f"Error {i}: μ={mu:.2f}, σ={std:.2f}, 95% CI={ci:.3f} pixels")
+        # Plot histogram
+        plt.hist(errors[i], bins=n_bins, alpha=0.5, density=True, label=f'Error {field}', color='C'+str(i))
+        # Generate x values for the normal distribution
+        x = np.linspace(min(errors[i]), max(errors[i]), 1000)
+        # Plot the normal distribution
+        plt.plot(x, norm.pdf(x, mu, std), 'r--', lw=2, label=f'{field} fit: μ={mu:.2f}, σ={std:.2f}')
+        # Plot 95% CI lines
+        plt.axvline(ci, color='red', linestyle=':', linewidth=2, label=f'{field} 95% CI: {ci:.3f}')
 
-    # Plot PDFs
-    x_x = np.linspace(min(errors_x), max(errors_x), 1000)
-    x_y = np.linspace(min(errors_y), max(errors_y), 1000)
-    x_total = np.linspace(0, max(errors), 1000)  # Rayleigh starts at 0
 
-    plt.plot(x_x, norm.pdf(x_x, mu_x, std_x), 'r--', lw=2, 
-            label=f'X fit: μ={mu_x:.2f}, σ={std_x:.2f}')
-    plt.plot(x_y, norm.pdf(x_y, mu_y, std_y), 'g--', lw=2, 
-            label=f'Y fit: μ={mu_y:.2f}, σ={std_y:.2f}')
+    # Fit Rayleigh distribution to total error
+    rayleigh_params = rayleigh.fit(total_errors_safe, floc=0)  # Fix location at 0
+    scale_total = rayleigh_params[1]  # Scale parameter (σ) of Rayleigh distribution
+    ci_total = rayleigh.ppf(confidence_level, scale=scale_total)  # Rayleigh CI
+
+    print(f"Total errors: σ={scale_total:.2f}, 95% CI={ci_total:.3f} pixels")
+
+    plt.hist(total_errors_safe, bins=n_bins, alpha=0.5, density=True, label='Total errors', color='blue')
+
+    x_total = np.linspace(0, max(total_errors_safe), 1000)  # Rayleigh starts at 0
     plt.plot(x_total, rayleigh.pdf(x_total, scale=scale_total), 'b--', lw=2, 
             label=f'Total fit: σ={scale_total:.2f}')
 
-    # Plot 95% CI lines
-    plt.axvline(ci_x, color='red', linestyle=':', linewidth=2, 
-                label=f'X 95% CI: {ci_x:.3f}')
-    plt.axvline(ci_y, color='green', linestyle=':', linewidth=2, 
-                label=f'Y 95% CI: {ci_y:.3f}')
     plt.axvline(ci_total, color='blue', linestyle=':', linewidth=2, 
                 label=f'Total 95% CI: {ci_total:.3f}')
 
@@ -1536,7 +1526,7 @@ def evaluate_classification_tracker(model, testloader, device, num_steps=10, pri
             if print_results: print(f"Average X Error: {avg_error_x:.4f} pixels, Average Y Error: {avg_error_y:.4f} pixels")
             return avg_error_x, avg_error_y
         elif operation == "distribution":
-            plot_error_distribution(all_errors_x, all_errors_y)
+            plot_error_distribution(all_errors_x, all_errors_y) # This doesnt work anymore. Make it work for N variables
             return all_errors_x, all_errors_y
 
 def evaluate_video_classification_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=CHUNK_SIZE):
@@ -1583,9 +1573,10 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                 avg_error = np.mean(all_errors[i])
                 avg_error_all_labels.append(avg_error)
                 if print_results: print(f"Average Error for {label}: {avg_error:.4f} pixels")
+            return np.array(avg_error_all_labels)
         elif operation == "distribution":
-            plot_error_distribution(all_errors)
-        return np.array(avg_error_all_labels)
+            plot_error_distribution(all_errors, fields=testloader.dataset.labels)
+            return
         
 
 def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", weighted_avg=False):
@@ -1639,7 +1630,7 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
     if weighted_avg is None:
         weighted_avg = getattr(model, "weighted_avg", False)
 
-    all_errors = []
+    all_errors = [[] for _ in range(len(testloader.dataset.labels))]
     max_values = [model.max_values[label] for label in testloader.dataset.labels]
 
     with torch.no_grad():
@@ -1672,19 +1663,20 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
                     labels_valid = labels_chunk[:, :, i][valid_mask]
                     output_valid = output[valid_mask] * max_value
                     errors = torch.abs(output_valid - labels_valid)
-                    all_errors.extend(errors.cpu().numpy())
+                    all_errors[i].extend(errors.cpu().tolist())
                 del output, labels_valid, output_valid, max_value, errors, imgs_chunk, labels_chunk, outputs, valid_mask
-
             torch.cuda.empty_cache()
+        all_errors = np.array(all_errors)
         if operation == "mean":
             avg_error_all_labels = []
             for i, label in enumerate(testloader.dataset.labels):
-                avg_error = np.mean(all_errors)
+                avg_error = np.mean(all_errors[i])
                 avg_error_all_labels.append(avg_error)
                 if print_results: print(f"Average Error for {label}: {avg_error:.4f} pixels")
+            return np.array(avg_error_all_labels)
         elif operation == "distribution":
-            plot_error_distribution(all_errors_x, all_errors_y)
-        return np.array(avg_error_all_labels)
+            plot_error_distribution(all_errors, fields=testloader.dataset.labels)
+            return
 
 
 def plot_timestep_curve(model, testloader, device, identifier="", interval = [1, 100, 5]):
@@ -1817,3 +1809,37 @@ def load_model(path, model_class, trainset, device):
     model.training_params = checkpoint['training_params']
     model.to(device)
     return model
+
+def get_preds_video_regression(model, video, length, labels, device, num_steps=20, weighted_avg = False): # This one shows also the prediction from the model
+    """Generator that yields images, labels, and predictions given one sequence of images."""
+    model.eval()
+    with torch.no_grad():
+        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
+        print(len(outputs))
+        if weighted_avg:
+            outputs = logits_to_weighted_avg(outputs)
+            print(len(outputs))
+        preds = []
+        max_values = [model.max_values[label] for label in labels]
+        for _, (output, max_val) in enumerate(zip(outputs, max_values)):
+            print(output.shape)
+            pred = output * max_val
+            print(pred.shape)
+            preds.append(pred.squeeze(0).cpu().numpy())
+        preds = np.array(preds)
+        print(preds.shape)
+    return preds
+
+def get_preds_video_classification(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
+    model.eval()
+    with torch.no_grad():
+        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
+        preds = []
+        for _, output in enumerate(outputs):
+            print(output.shape)
+            pred = torch.argmax(output, dim=1)
+            print(pred.shape)
+            preds.extend(pred.cpu().numpy())
+        preds = np.array(preds)
+        print(preds.shape)
+    return preds

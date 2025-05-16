@@ -754,6 +754,9 @@ class Tracking3DVideoDataset(Dataset):
         labels = torch.stack(labels, dim=0)  # [N_valid, N_labels]
         return images, labels, images.size(0)
 
+    def __gettr__(self, idx):
+        """Get the trajectory ID for a given index."""
+        return self.trajectories.iloc[idx]["tr"]
 
 # GENERATORS
 
@@ -807,36 +810,6 @@ def image_gen_for_video(video, labels, preds = None): # This one just shows the 
 
         if preds is None: yield idx, img, label, height, width
         else: yield idx, img, label, [preds[i, idx] for i in range(len(preds))], height, width
-
-def get_preds_video_regression(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
-    """Generator that yields images, labels, and predictions given one sequence of images."""
-    model.eval()
-    with torch.no_grad():
-        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
-        preds = []
-        max_values = [model.max_values[label] for label in labels]
-        for _, (output, max_val) in enumerate(zip(outputs, max_values)):
-            print(output.shape)
-            pred = output * max_val
-            print(pred.shape)
-            preds.extend(pred.squeeze(0).cpu().numpy())
-        preds = np.array(preds)
-        print(preds.shape)
-    return preds
-
-def get_preds_video_classification(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
-    model.eval()
-    with torch.no_grad():
-        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
-        preds = []
-        for _, output in enumerate(outputs):
-            print(output.shape)
-            pred = torch.argmax(output, dim=1)
-            print(pred.shape)
-            preds.extend(pred.cpu().numpy())
-        preds = np.array(preds)
-        print(preds.shape)
-    return preds
 
 def increase_contrast(tensor_img, factor):
     """

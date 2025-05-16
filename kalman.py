@@ -63,26 +63,3 @@ class CA3DKalmanFilter:
         self.x = self.x + K @ y
         I = np.eye(self.dim_x)
         self.P = (I - K @ self.H) @ self.P
-
-# Example usage:
-dt = 0.1
-process_var_acc = 0.01
-meas_var_pos = 0.5
-initial_state = np.array([0,0,0, 0,0,0, 0,0,-9.81])
-
-kf = CA3DKalmanFilter(dt, process_var_acc, meas_var_pos, initial_state)
-
-# Simulated 3D parabolic trajectory (replace with your SNN outputs)
-times = np.arange(0, 1, dt)
-measurements = np.vstack([
-    5 * times,         # x = 5 t
-    3 * times,         # y = 3 t
-    -4.9 * times**2    # z = -½ g t^2
-]).T
-
-for z in measurements:
-    kf.predict()
-    kf.update(z)
-
-print("Estimated state (pos,vel,acc):")
-print(kf.x.flatten())
