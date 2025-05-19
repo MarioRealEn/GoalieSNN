@@ -1236,7 +1236,7 @@ def classification_loss(model, outputs, labels, max_values = None, mask = None):
         # The mask will have shape [batch, max_seq_length]
         # mask = torch.arange(max_seq_length, device=logits[0].device).expand(batch, max_seq_length) < lengths.unsqueeze(1)              # [batch * max_seq_length]
         for i, logit in enumerate(outputs):
-            labels_valid = labels[mask][:, i]
+            labels_valid = labels[:, :, i][mask]
             # print(labels_valid.max(), labels_valid.min())
             logit = logit.transpose(2, 1)
             logit_valid = logit[mask]
@@ -1532,7 +1532,10 @@ def evaluate_classification_tracker(model, testloader, device, num_steps=10, pri
 def evaluate_video_classification_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", chunk_size=CHUNK_SIZE):
     model.eval()  # Set model to evaluation mode
     print("Evaluating video classification tracker")
-    all_errors = [[] for _ in range(len(testloader.dataset.labels))]
+    n_fields = len(testloader.dataset.labels)
+    all_errors = [[] for _ in range(n_fields)]
+    all_gts = [[] for _ in range(n_fields)]
+    all_preds = [[] for _ in range(n_fields)]
         
     with torch.no_grad():
         for padded_imgs, padded_labels, lengths in testloader:
@@ -1563,12 +1566,13 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                     errors = torch.abs(pred.squeeze(-1) - labels_valid[:, i])
                     # print('Errors', errors.shape)
                     all_errors[i].extend(errors.cpu().tolist())
+                    all_gts[i].extend(labels_valid[:, i].cpu().tolist())
+                    all_preds[i].extend(pred.cpu().tolist())
                 del outputs, labels_valid, errors, imgs_chunk, labels_chunk, valid_mask, output, pred
 
             torch.cuda.empty_cache()
         if operation == "mean":
             avg_error_all_labels = []
-            print('All errors', len(all_errors))
             for i, label in enumerate(testloader.dataset.labels):
                 avg_error = np.mean(all_errors[i])
                 avg_error_all_labels.append(avg_error)
@@ -1577,6 +1581,16 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
         elif operation == "distribution":
             plot_error_distribution(all_errors, fields=testloader.dataset.labels)
             return
+        elif operation == "by_field":
+            if print_results:
+                for i in range(n_fields):
+                    arr = torch.tensor(all_errors[i], dtype=torch.float32)
+                    agg = getattr(torch, operation)(arr) if operation in dir(torch) else arr.mean()
+                    print(f"Head {i}: {operation} error = {agg:.4f}")
+            return np.array(all_errors), np.array(all_gts)
+        elif operation == "preds":
+            return np.array(all_preds), np.array(all_gts)
+
         
 
 def evaluate_regression_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean", weighted_avg=False):
@@ -1630,8 +1644,11 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
     if weighted_avg is None:
         weighted_avg = getattr(model, "weighted_avg", False)
 
-    all_errors = [[] for _ in range(len(testloader.dataset.labels))]
+    n_fields = len(testloader.dataset.labels)
+    all_errors = [[] for _ in range(n_fields)]
     max_values = [model.max_values[label] for label in testloader.dataset.labels]
+    all_gts = [[] for _ in range(n_fields)]
+    all_preds = [[] for _ in range(n_fields)]
 
     with torch.no_grad():
         for padded_imgs, padded_labels, lengths in testloader:
@@ -1664,6 +1681,8 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
                     output_valid = output[valid_mask] * max_value
                     errors = torch.abs(output_valid - labels_valid)
                     all_errors[i].extend(errors.cpu().tolist())
+                    all_gts[i].extend(labels_valid.cpu().tolist())
+                    all_preds[i].extend(output_valid.cpu().tolist())
                 del output, labels_valid, output_valid, max_value, errors, imgs_chunk, labels_chunk, outputs, valid_mask
             torch.cuda.empty_cache()
         all_errors = np.array(all_errors)
@@ -1677,6 +1696,15 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
         elif operation == "distribution":
             plot_error_distribution(all_errors, fields=testloader.dataset.labels)
             return
+        elif operation == "by_field":
+            if print_results:
+                for i in range(n_fields):
+                    arr = torch.tensor(all_errors[i], dtype=torch.float32)
+                    agg = getattr(torch, operation)(arr) if operation in dir(torch) else arr.mean()
+                    print(f"Head {i}: {operation} error = {agg:.4f}")
+            return np.array(all_errors), np.array(all_gts)
+        elif operation == "preds":
+            return np.array(all_preds), np.array(all_gts)
 
 
 def plot_timestep_curve(model, testloader, device, identifier="", interval = [1, 100, 5]):

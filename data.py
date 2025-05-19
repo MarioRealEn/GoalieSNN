@@ -720,13 +720,18 @@ class Tracking3DVideoDataset(Dataset):
 
             # apply quantization to image
             if self.quantization > 1:
-                h_q = H // self.quantization
-                w_q = W // self.quantization
-                image_tensor = F.interpolate(
-                    image_tensor.unsqueeze(0), 
-                    size=(h_q, w_q), 
-                    mode="bilinear", 
-                    align_corners=False
+                # h_q = H // self.quantization
+                # w_q = W // self.quantization
+                # image_tensor = F.interpolate(
+                #     image_tensor.unsqueeze(0), 
+                #     size=(h_q, w_q), 
+                #     mode="bilinear", 
+                #     align_corners=False
+                # ).squeeze(0)
+                image_tensor = F.max_pool2d(
+                    image_tensor.unsqueeze(0),            # add batch dim
+                    kernel_size=self.quantization,
+                    stride=self.quantization
                 ).squeeze(0)
 
             # 5) Data augmentation on this single frame

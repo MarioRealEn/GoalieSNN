@@ -914,3 +914,19 @@ class Camera():
         if r_proj is None:
             return False
         return field_of_view_constraint(r_proj)
+    
+    def calculate_pixel_real_world_size(self, distance):
+        """
+        Calculate the real-world size represented by one pixel in a pinhole camera model.
+
+        Parameters:
+        sensor_width (float): Physical width of the camera sensor in meters.
+        image_width (int): Number of pixels in the image width.
+        focal_length (float): Focal length of the camera in meters.
+        distance (float): Distance to the object in meters.
+
+        Returns:
+        float: Real-world size per pixel in meters.
+        """
+        real_size_per_pixel = self.pixel_width * (distance / self.focal_length)
+        return real_size_per_pixel

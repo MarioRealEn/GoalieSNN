@@ -1,7 +1,7 @@
 import numpy as np
 
 class CA3DKalmanFilter:
-    def __init__(self, dt, process_var_acc, meas_var_pos,
+    def __init__(self, dt, process_var_acc, meas_var_pos = None,
                  initial_state=None, initial_covariance=1e3):
         """
         3D constant-acceleration Kalman Filter with state [x,y,z,vx,vy,vz,ax,ay,az].
@@ -42,7 +42,10 @@ class CA3DKalmanFilter:
         self.Q = Q
 
         # Measurement noise
-        self.R = np.eye(3) * meas_var_pos
+        if meas_var_pos is not None:
+            self.R = np.eye(3) * meas_var_pos
+        else:
+            self.R = np.eye(3)
 
     def predict(self):
         # x = F x
@@ -52,9 +55,10 @@ class CA3DKalmanFilter:
 
     def update(self, z):
         """
-        z: (3,) or (3,1) measurement vector [x,y,z]
+        z: (3,) or (3,1) measurement vector [x,y,R]
         """
         z = z.reshape((3,1))
+        radius = z[2,0]
         # Innovation
         y = z - (self.H @ self.x)
         S = self.H @ self.P @ self.H.T + self.R
