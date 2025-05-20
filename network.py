@@ -817,7 +817,7 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
             flattened_size = x.view(1, -1).size(1)
         return flattened_size
 
-    def forward(self, sequences_lengths, num_steps_per_image=10):
+    def forward(self, sequences_lengths, membrane_potentials, num_steps_per_image=10):
         """
         x: input tensor of shape [batch, channels, height, width]
         num_steps: number of simulation time steps (simulate repeated evaluation to mimic spiking dynamics)
@@ -827,9 +827,12 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
         batch_size, max_seq_len = padded_x.shape[:2]
 
         # # Initialize hidden states
-        mem1 = self.lif1.init_leaky()
-        mem2 = self.lif2.init_leaky()
-        mem3 = self.lif3.init_leaky()
+        if len(membrane_potentials) == 0:
+            mem1 = self.lif1.init_leaky()
+            mem2 = self.lif2.init_leaky()
+            mem3 = self.lif3.init_leaky()
+        else:
+            mem1, mem2, mem3 = membrane_potentials
 
         # Record final layer
         # Initialize tensors to store outputs for each time step per sequence.
@@ -868,7 +871,7 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
                 for j, label in enumerate(self.labels):
                     fc_out = self.fc_layers[label](s3_flat)
                     # spk_out, _ = self.lif_layers[label](fc_out)
-                    outputs[j] += fc_out
+                    outputs[j].add_(fc_out)
 
                 # Delete intermediate tensors
                 del x1, spk1, x2, spk2, x3, spk3, s3_flat
@@ -884,8 +887,8 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
         # Apply softmax to get probabilities
         # probs_x = F.softmax(outputs_x, dim=1)
         # probs_y = F.softmax(outputs_y, dim=1)
-        
-        return outputs_seq#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
+        membrane_potentials = [mem1, mem2, mem3]
+        return outputs_seq, membrane_potentials #, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
     
     def start_training(self, trainloader, optimizer, device, loss_function = None, validationloader = None, num_steps = 10, num_epochs=20, plot = True, chunk_size = CHUNK_SIZE, save = []):
         batch_size = trainloader.batch_size
@@ -1156,6 +1159,7 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
             # iterate over each chunk of the sequence
             T = padded_imgs.size(1)
             total_chunks = T // chunk_size + (T % chunk_size > 0)
+            membrane_potentials = []
             for t0 in range(0, T, chunk_size):
                 t1 = min(t0 + chunk_size, T)
                 imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
@@ -1166,22 +1170,26 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
                 valid_mask = frame_idx < lengths.unsqueeze(1)                  # [B, chunk]
 
                 # forward pass on just this chunk
-                logits = model((imgs_chunk, lengths), num_steps_per_image=num_steps)
+                logits, new_mem = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
+                membrane_potentials = [m.detach() for m in new_mem]
+
+                # print(labels_chunk.shape)
+                # outputs_array = [labels_chunk[:,:,i] for i in range(3)]
 
                 loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values)
 
 
-                # Accumulate grads over chunks and step once after the inner loop:
+                # Accumulate grads over chunks and step :
                 loss.backward()
                 epoch_loss += loss.item()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
                 total_chunks += 1
 
                 # free up memory
                 del imgs_chunk, labels_chunk, logits, loss, valid_mask
 
             # Step here:
-            optimizer.step()
-            optimizer.zero_grad()
             torch.cuda.empty_cache()
         avg_loss = epoch_loss / trainloader.dataset.return_n_frames()
         epoch_losses.append(avg_loss)
@@ -1291,7 +1299,7 @@ def pinn_loss(model,
         if getattr(model, "weighted_avg", False):
             preds = logits_to_weighted_avg(outputs)
         else:
-            preds = [torch.argmax(o, dim=1) for o in outputs]
+            preds = outputs
     else:
         raise ValueError("Invalid task type. Expected 'regression' or 'classification'.")
     # print('Preds', preds[0].shape)
@@ -1309,6 +1317,7 @@ def pinn_loss(model,
 
     # 3) Sum across dims → [N_valid], then mean over all samples
     err_sum = torch.stack(sq_errs, dim=0).sum(dim=0)  # [N_valid]
+    print(err_sum.shape)
     L_data  = err_sum.mean()                         # scalar
 
     # L_data = torch.mean(
@@ -1546,6 +1555,7 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
             
             # iterate over each chunk of the sequence
             T = padded_imgs.size(1)
+            membrane_potentials = []
             for t0 in range(0, T, chunk_size):
                 t1 = min(t0 + chunk_size, T)
                 imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
@@ -1556,7 +1566,7 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                 valid_mask = frame_idx < lengths.unsqueeze(1)                  # [B, chunk]
 
                 # forward pass on just this chunk
-                outputs = model((imgs_chunk, lengths), num_steps_per_image=num_steps)
+                outputs, membrane_potentials = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
 
                 labels_valid = labels_chunk[valid_mask]
                 for i, output in enumerate(outputs):
@@ -1659,6 +1669,7 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
 
             # iterate over each chunk of the sequence
             T = padded_imgs.size(1)
+            membrane_potentials = []
             for t0 in range(0, T, chunk_size):
                 t1 = min(t0 + chunk_size, T)
                 imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
@@ -1669,7 +1680,7 @@ def evaluate_video_regression_tracker(model, testloader, device, num_steps=10, p
                 valid_mask = frame_idx < lengths.unsqueeze(1)                  # [B, chunk]
 
                 # forward pass on just this chunk
-                outputs = model((imgs_chunk, lengths), num_steps_per_image=num_steps)
+                outputs, membrane_potentials = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
 
                 if weighted_avg:
                     outputs = logits_to_weighted_avg(outputs)
@@ -1861,7 +1872,7 @@ def get_preds_video_regression(model, video, length, labels, device, num_steps=2
 def get_preds_video_classification(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
     model.eval()
     with torch.no_grad():
-        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
+        outputs, _ = model((video.unsqueeze(0).to(device), torch.tensor([length])), [], num_steps_per_image=num_steps)
         preds = []
         for _, output in enumerate(outputs):
             print(output.shape)
@@ -1871,3 +1882,36 @@ def get_preds_video_classification(model, video, length, labels, device, num_ste
         preds = np.array(preds)
         print(preds.shape)
     return preds
+
+def invert_argmax(indices: torch.LongTensor,
+                  num_classes: int = None,
+                  dim: int = -1,
+                  dtype=torch.float32) -> torch.Tensor:
+    """
+    Given an integer tensor of indices, return a tensor of scores such that
+    `scores.argmax(dim)` == `indices`.
+
+    Args:
+        indices    (LongTensor): input tensor of indices.
+        num_classes (int, optional): number of classes. If None, it will be inferred
+                                     as indices.max()+1.
+        dim         (int):       dimension along which to one‐hot / argmax.
+        dtype       (torch.dtype): dtype of the output scores.
+
+    Returns:
+        Tensor of shape indices.shape[:dim] + [num_classes] + indices.shape[dim+1:]
+        where out[i,…,j,…] = 1 if j == indices[i,…] else 0.
+    """
+    if num_classes is None:
+        num_classes = int(indices.max().item()) + 1
+
+    # Build output shape
+    out_shape = list(indices.shape)
+    out_shape.insert(dim if dim >= 0 else dim + indices.dim() + 1, num_classes)
+
+    # Create empty and scatter 1s at target locations
+    out = torch.zeros(*out_shape, dtype=dtype, device=indices.device)
+    # expand indices to have a size-1 axis at `dim`
+    idx_expanded = indices.unsqueeze(dim)
+    out.scatter_(dim, idx_expanded, 1.0)
+    return out

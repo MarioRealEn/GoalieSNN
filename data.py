@@ -537,7 +537,9 @@ class Tracking3DVideoDataset(Dataset):
     ):
         assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Train, val, and test ratios must sum to 1."
         self.split = split
-        self.augment = augment
+        if augment:
+            print("Warning: augmentations are not implemented for this dataset due to cache issues. Setting augment=False") 
+        self.augment = False
         self.vert_flip = vert_flip
         self.rotation = rotation
         self.slices_dir = os.path.join(dataset_path, f'avi_videos_{accumulation_time}ms')
@@ -640,7 +642,7 @@ class Tracking3DVideoDataset(Dataset):
     def _load_full_video(self, trajectory_id):
         """Loads and caches the full video tensor for a given trajectory."""
         path = os.path.join(self.slices_dir, f"tr{trajectory_id}.avi")
-        cap  = cv2.VideoCapture(path)
+        cap  = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             raise ValueError(f"Could not open video file: {path}")
 
@@ -664,11 +666,13 @@ class Tracking3DVideoDataset(Dataset):
         frames_video = self.positions[self.positions["tr"] == trajectory]
         if frames_video.empty:
             raise IndexError(f"No frames for trajectory {trajectory}")
-
+        video_from_cache = True
         # 2) Load or fetch from cache the full video tensor
         if trajectory not in self._video_cache:
-            self._video_cache[trajectory] = self._load_full_video(trajectory)
-        full_video = self._video_cache[trajectory]  # [T, 2, H, W]
+            full_video = self._load_full_video(trajectory)
+            video_from_cache = False
+        else:
+            full_video = self._video_cache[trajectory]  # [T, 2, H, W]
         T, C, H, W = full_video.shape
 
         # 3) Decide augmentation once per sequence
@@ -683,7 +687,7 @@ class Tracking3DVideoDataset(Dataset):
                 transformation = "rotate"
                 angle = random.uniform(-15, 15)
 
-        images = []
+        video = []
         labels = []
 
         # 4) Iterate only over the rows you need
@@ -701,10 +705,6 @@ class Tracking3DVideoDataset(Dataset):
             # slice single frame [2, H, W]
             image_tensor = full_video[n_frame]
 
-            # optional cropping/margins
-            if self.crop_margins:
-                image_tensor, _ = self.crop_item(image_tensor, None)  # assume your crop_item can handle None
-
             # fetch and quantize label
             raw = np.array([row[l] for l in label_fields])
             x, y, r = raw / self.label_quantization
@@ -719,7 +719,7 @@ class Tracking3DVideoDataset(Dataset):
 
 
             # apply quantization to image
-            if self.quantization > 1:
+            if self.quantization > 1 and not video_from_cache:
                 # h_q = H // self.quantization
                 # w_q = W // self.quantization
                 # image_tensor = F.interpolate(
@@ -753,15 +753,28 @@ class Tracking3DVideoDataset(Dataset):
             label_vals = [x, y, r, in_fov] if in_fov is not None else [x, y, r]
             label = torch.tensor(label_vals, dtype=torch.float32)
 
-            images.append(image_tensor)
+            video.append(image_tensor)
             labels.append(label)
-        images = torch.stack(images, dim=0)  # [N_valid, 2, H', W']
+        video = torch.stack(video, dim=0)  # [N_valid, 2, H', W']
         labels = torch.stack(labels, dim=0)  # [N_valid, N_labels]
-        return images, labels, images.size(0)
+        if not video_from_cache:
+            self._video_cache[trajectory] = video  # cache the video tensor
+        return video, labels, video.size(0)
 
     def __gettr__(self, idx):
         """Get the trajectory ID for a given index."""
         return self.trajectories.iloc[idx]["tr"]
+    
+    def __getcachesize__(self):
+        """Get the size of the video cache."""
+        size = 0
+        for key in self._video_cache:
+            size += self.__getsizeinmbs__(self._video_cache[key])
+        return size
+    
+    def __getsizeinmbs__(self, traj):
+        return traj.numel() * traj.element_size() / (1024**2)  # in MB
+
 
 # GENERATORS
 
