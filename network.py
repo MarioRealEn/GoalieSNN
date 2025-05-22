@@ -1194,7 +1194,7 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
         avg_loss = epoch_loss / trainloader.dataset.return_n_frames()
         epoch_losses.append(avg_loss)
         model.training_params["num_epochs"] += 1
-        if epoch in save:
+        if epoch + 1 in save:
             save_model(model)
 
         if validationloader is not None:
@@ -1852,8 +1852,9 @@ def load_model(path, model_class, trainset, device):
 def get_preds_video_regression(model, video, length, labels, device, num_steps=20, weighted_avg = False): # This one shows also the prediction from the model
     """Generator that yields images, labels, and predictions given one sequence of images."""
     model.eval()
+    membrane = []
     with torch.no_grad():
-        outputs = model((video.unsqueeze(0).to(device), torch.tensor([length])), num_steps_per_image=num_steps)
+        outputs, membrane = model((video.unsqueeze(0).to(device), torch.tensor([length])), membrane, num_steps_per_image=num_steps)
         print(len(outputs))
         if weighted_avg:
             outputs = logits_to_weighted_avg(outputs)

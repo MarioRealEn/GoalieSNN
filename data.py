@@ -14,6 +14,7 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 import matplotlib.pyplot as plt
 import time
+import kornia.filters as kfilters
 
 
 DATASET_PREFIX_MAP = {
@@ -537,9 +538,7 @@ class Tracking3DVideoDataset(Dataset):
     ):
         assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Train, val, and test ratios must sum to 1."
         self.split = split
-        if augment:
-            print("Warning: augmentations are not implemented for this dataset due to cache issues. Setting augment=False") 
-        self.augment = False
+        self.augment = augment
         self.vert_flip = vert_flip
         self.rotation = rotation
         self.slices_dir = os.path.join(dataset_path, f'avi_videos_{accumulation_time}ms')
@@ -550,6 +549,7 @@ class Tracking3DVideoDataset(Dataset):
         self.labels = labels
         self.n_frames = None
         self._video_cache = {}
+        self._label_cache = {}
         if quantization < 1 or label_quantization < 1:
             raise ValueError("Quantization factors must be >= 1")
         if quantization > 1 and label_quantization == 1:
@@ -671,14 +671,17 @@ class Tracking3DVideoDataset(Dataset):
         if trajectory not in self._video_cache:
             full_video = self._load_full_video(trajectory)
             video_from_cache = False
+            T, C, H, W = full_video.shape
+            H, W = H // self.quantization, W // self.quantization
         else:
             full_video = self._video_cache[trajectory]  # [T, 2, H, W]
-        T, C, H, W = full_video.shape
+            T, C, H, W = full_video.shape
+            labels_cache = self._label_cache[trajectory]  # [T, N_labels]
 
         # 3) Decide augmentation once per sequence
         transformation = None
         angle = 0.0
-        if self.split == "train" and self.augment:
+        if self.augment:
             if random.random() > 0.5:
                 transformation = "hflip"
             if random.random() > 0.5 and self.vert_flip:
@@ -706,33 +709,39 @@ class Tracking3DVideoDataset(Dataset):
             image_tensor = full_video[n_frame]
 
             # fetch and quantize label
-            raw = np.array([row[l] for l in label_fields])
-            x, y, r = raw / self.label_quantization
-            r = min(max(0, r), MAX_VAL_R_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_R_CAM]
-            y = min(max(0, y), MAX_VAL_Y_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_Y_CAM]
-            # if r > 100:
-            #     print(f"Warning: R value out of bounds for {row['Frame']}, r={r}")
-            #     print(raw)
-            #     print(self.label_quantization)
-            #     print(MAX_VAL_R_CAM)
-            if in_fov_flag: in_fov = row["in_fov"]
+            if video_from_cache:
+                if in_fov_flag:
+                    x, y, r, in_fov = labels_cache[n_frame]
+                else:
+                    x, y, r = labels_cache[n_frame]
+            else:
+                raw = np.array([row[l] for l in label_fields])
+                x, y, r = raw / self.label_quantization
+                r = min(max(0, r), MAX_VAL_R_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_R_CAM]
+                y = min(max(0, y), MAX_VAL_Y_CAM//self.label_quantization)  # clamp to [0, MAX_VAL_Y_CAM]
+                # if r > 100:
+                #     print(f"Warning: R value out of bounds for {row['Frame']}, r={r}")
+                #     print(raw)
+                #     print(self.label_quantization)
+                #     print(MAX_VAL_R_CAM)
+                if in_fov_flag: in_fov = row["in_fov"]
 
-
-            # apply quantization to image
-            if self.quantization > 1 and not video_from_cache:
-                # h_q = H // self.quantization
-                # w_q = W // self.quantization
-                # image_tensor = F.interpolate(
-                #     image_tensor.unsqueeze(0), 
-                #     size=(h_q, w_q), 
-                #     mode="bilinear", 
-                #     align_corners=False
-                # ).squeeze(0)
-                image_tensor = F.max_pool2d(
-                    image_tensor.unsqueeze(0),            # add batch dim
-                    kernel_size=self.quantization,
-                    stride=self.quantization
-                ).squeeze(0)
+                # apply quantization to image
+                if self.quantization > 1:
+                    # h_q = H // self.quantization
+                    # w_q = W // self.quantization
+                    # image_tensor = F.interpolate(
+                    #     image_tensor.unsqueeze(0), 
+                    #     size=(h_q, w_q), 
+                    #     mode="bilinear", 
+                    #     align_corners=False
+                    # ).squeeze(0)
+                    image_tensor = F.max_pool2d(
+                        image_tensor.unsqueeze(0),            # add batch dim
+                        kernel_size=self.quantization,
+                        stride=self.quantization
+                    ).squeeze(0)
+                    # image_tensor = self.bilateral_downsample(image_tensor, scale=self.quantization)
 
             # 5) Data augmentation on this single frame
             if transformation == "hflip":
@@ -759,6 +768,7 @@ class Tracking3DVideoDataset(Dataset):
         labels = torch.stack(labels, dim=0)  # [N_valid, N_labels]
         if not video_from_cache:
             self._video_cache[trajectory] = video  # cache the video tensor
+            self._label_cache[trajectory] = labels  # cache the label tensor
         return video, labels, video.size(0)
 
     def __gettr__(self, idx):
@@ -774,6 +784,71 @@ class Tracking3DVideoDataset(Dataset):
     
     def __getsizeinmbs__(self, traj):
         return traj.numel() * traj.element_size() / (1024**2)  # in MB
+    
+    def downscale_gaussian(self, frame, scale):
+        """Blurs then resizes for arbitrary downscaling."""
+        # 1) Compute sigma for gaussian blur: a rule-of-thumb is sigma ≈ 0.5 * minKernelRadius
+        sigma = 0.8
+        # kernel size: odd, e.g. 5 or 7; larger means stronger denoising
+        ksize = 5  
+        blurred = cv2.GaussianBlur(frame, (ksize, ksize), sigmaX=sigma)
+        # 2) Resize with INTER_AREA, which is best for downsampling
+        h, w = frame.shape[:2]
+        new_size = (int(w/scale), int(h/scale))
+        return cv2.resize(blurred, new_size, interpolation=cv2.INTER_AREA)
+    
+    def gaussian_downsample(self,
+                            x: torch.Tensor,
+                            scale: int = 2,
+                            kernel_size: int = 5,
+                            sigma: float = 1.0) -> torch.Tensor:
+        """
+        Blur + downsample a [B,C,H,W] tensor by an integer `scale`.
+        - Applies a Gaussian low-pass (conv2d) per channel
+        - Then uses area-based interpolate for clean subsampling
+
+        Args:
+        x          : input tensor, shape [B,C,H,W]
+        scale      : integer downsampling factor (e.g. 2 → halves H,W)
+        kernel_size: odd size of the Gaussian kernel
+        sigma      : standard deviation for Gaussian
+
+        Returns:
+        Tensor of shape [B,C,H/scale,W/scale]
+        """
+        C, H, W = x.shape
+        # Build a single-channel 2D Gaussian kernel
+        ax = torch.arange(kernel_size, dtype=x.dtype, device=x.device) - (kernel_size - 1) / 2.
+        xx, yy = torch.meshgrid(ax, ax, indexing='ij')
+        kernel = torch.exp(-(xx**2 + yy**2) / (2 * sigma**2))
+        kernel = kernel / kernel.sum()
+        # Expand to (C×1×K×K) for group conv
+        kernel = kernel.view(1, 1, kernel_size, kernel_size).repeat(C, 1, 1, 1)
+
+        # 1) Blur each channel
+        padding = kernel_size // 2
+        x_blur = F.conv2d(x, kernel, groups=C, padding=padding)
+
+        # 2) Downsample using area interpolation (best for decimation)
+        new_h, new_w = H // scale, W // scale
+        x_down = F.interpolate(x_blur.unsqueeze(0), size=(new_h, new_w),
+                            mode='area').squeeze(0)
+        return x_down
+    
+    def bilateral_downsample(self, x, scale=2,
+                            kernel_size=(7,7), sigma_space=(2.0,2.0),
+                            sigma_color=(0.1,0.1)):
+        # x: [B,C,H,W], float in [0,1] or [0,255]
+        # 1) edge-preserving blur
+        x_blur = kfilters.bilateral_blur(
+            x.unsqueeze(0), kernel_size=kernel_size,
+            sigma_space=sigma_space,
+            sigma_color=sigma_color
+        ).squeeze(0)
+        # 2) decimate with area interp
+        new_h, new_w = x.shape[-2] // scale, x.shape[-1] // scale
+        return F.interpolate(x_blur, size=(new_h,new_w), mode='area')
+
 
 
 # GENERATORS
