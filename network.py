@@ -840,6 +840,10 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
         for i in range(len(self.labels)):
             outputs_seq.append(torch.zeros(batch_size, self.n_bins[i], max_seq_len, device=padded_x.device))
 
+        total_spikes1 = 0
+        total_spikes2 = 0
+        total_spikes3 = 0
+
         for i in range(max_seq_len):
             # Create a boolean mask for samples that have a valid image at time t
             valid_mask = (i < lengths).to(padded_x.device)
@@ -873,6 +877,10 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
                     # spk_out, _ = self.lif_layers[label](fc_out)
                     outputs[j].add_(fc_out)
 
+                total_spikes1 += spk1.sum().item()
+                total_spikes2 += spk2.sum().item()
+                total_spikes3 += spk3.sum().item()
+
                 # Delete intermediate tensors
                 del x1, spk1, x2, spk2, x3, spk3, s3_flat
             if padded_x.device == "cuda": torch.cuda.empty_cache()
@@ -881,16 +889,23 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
                 outputs[j] = outputs[j] / num_steps_per_image
                 outputs_seq[j][valid_mask, :, i] = outputs[j]
 
+
             # print('Outputs x and valid mask', outputs_x.shape, valid_mask.shape)
 
-        
+        C, H, W = self.image_shape
+        avg_spikes_1 = total_spikes1 / (num_steps_per_image * batch_size * max_seq_len * 16 * (H // 2) * (W // 2))
+        avg_spikes_2 = total_spikes2 / (num_steps_per_image * batch_size * max_seq_len * 32 * (H // 4) * (W // 4))
+        avg_spikes_3 = total_spikes3 / (num_steps_per_image * batch_size * max_seq_len * 64 * (H // 8) * (W // 8))
+        # print(f"Time step {i+1}/{max_seq_len}, Avg Spikes Layer 1: {avg_spikes_1:.4f}, Layer 2: {avg_spikes_2:.4f}, Layer 3: {avg_spikes_3:.4f}")
+        # print(mem3.min().item(), mem3.max().item())
+
         # Apply softmax to get probabilities
         # probs_x = F.softmax(outputs_x, dim=1)
         # probs_y = F.softmax(outputs_y, dim=1)
         membrane_potentials = [mem1, mem2, mem3]
         return outputs_seq, membrane_potentials #, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
     
-    def start_training(self, trainloader, optimizer, device, loss_function = None, validationloader = None, num_steps = 10, num_epochs=20, plot = True, chunk_size = CHUNK_SIZE, save = []):
+    def start_training(self, trainloader, optimizer, device, loss_function = None, validationloader = None, num_steps = 10, num_epochs=20, scheduler = None, warmup = None, plot = True, chunk_size = CHUNK_SIZE, save = [], grad_clip = False):
         batch_size = trainloader.batch_size
         if loss_function is None:
             if self.weighted_avg:
@@ -912,9 +927,12 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
             "learn_threshold": self.learn_threshold,
             "image_shape": self.image_shape,
             "weighted_avg": self.weighted_avg,
+            "epoch_losses": [],
+            "validation_errors": [],
+            "validation_losses": [],
             }
         
-        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot, save=save, chunk_size=chunk_size)
+        training_loop_videos(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, scheduler = scheduler, warmup=warmup, plot=plot, save=save, chunk_size=chunk_size, grad_clip=grad_clip)
     
     def evaluate(self, testloader, device, num_steps, print_results=False, operation = 'mean', weighted_avg = None, chunk_size = CHUNK_SIZE):
         if weighted_avg is None:
@@ -1016,6 +1034,10 @@ class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
             # Get the images for the valid sequences at time t (shape: [valid_batch, channels, height, width])
             x_t = padded_x[valid_mask, i]
 
+            total_spikes1 = 0
+            total_spikes2 = 0
+            total_spikes3 = 0
+
             outputs_x = 0
             outputs_y = 0
             outputs_z = 0
@@ -1042,6 +1064,10 @@ class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
                 outputs_y += out_y
                 outputs_z += out_z
 
+                total_spikes1 += spk1.sum(dim=(1, 2, 3))
+                total_spikes2 += spk2.sum(dim=(1, 2, 3))
+                total_spikes3 += spk3.sum(dim=(1, 2, 3))
+
                 # Delete intermediate tensors
                 del x1, spk1, x2, spk2, x3, spk3, s3_flat, out_x, out_y
             if padded_x.device == "cuda": torch.cuda.empty_cache()
@@ -1056,6 +1082,13 @@ class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
             outputs_seq_y[valid_mask, :, i] = outputs_y
             outputs_seq_z[valid_mask, :, i] = outputs_z
 
+            # Print average spikes per layer
+        C, H, W = self.image_shape
+        avg_spikes_1 = total_spikes1 / (num_steps_per_image * batch_size * max_seq_len * 16 * (H // 2) * (W // 2))
+        avg_spikes_2 = total_spikes2 / (num_steps_per_image * batch_size * max_seq_len * 32 * (H // 4) * (W // 4))
+        avg_spikes_3 = total_spikes3 / (num_steps_per_image * batch_size * max_seq_len * 64 * (H // 8) * (W // 8))
+        print(f"Time step {i+1}/{max_seq_len}, Avg Spikes Layer 1: {avg_spikes_1:.4f}, Layer 2: {avg_spikes_2:.4f}, Layer 3: {avg_spikes_3:.4f}")
+        
         
         return outputs_seq_x, outputs_seq_y, outputs_seq_z
     
@@ -1104,6 +1137,7 @@ def training_loop_images(model, trainloader, optimizer, device, loss_function, v
             loss = loss_function(model, logits, labels, max_values=max_values)
             
             loss.backward()
+            if model.grad_clipping: torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             epoch_loss += loss.item()
@@ -1138,8 +1172,8 @@ def training_loop_images(model, trainloader, optimizer, device, loss_function, v
         plt.show()
 
 
-def training_loop_videos(model, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, plot = True,
-                         chunk_size=CHUNK_SIZE, save = []):
+def training_loop_videos(model, trainloader, optimizer, device, loss_function, validationloader = None, num_steps = 10, num_epochs=20, scheduler = None, plot = True,
+                         warmup = None, chunk_size=CHUNK_SIZE, save = [], grad_clip = False):
     epoch_losses = []
     validation_errors = []
     max_values = [model.max_values[label] for label in trainloader.dataset.labels]
@@ -1181,9 +1215,18 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
 
                 # Accumulate grads over chunks and step :
                 loss.backward()
+                # max_grad_norm = 0.0
                 epoch_loss += loss.item()
+                if grad_clip: torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # for p in model.parameters():
+                #     if p.grad is not None:
+                #         param_norm = p.grad.data.norm(2)  # L2 norm
+                #         max_grad_norm = max(max_grad_norm, param_norm.item())
+                # print(f"Max gradient norm for epoch {epoch+1}, chunk {total_chunks}: {max_grad_norm:.4f}")
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+                if warmup is not None and epoch == 0:
+                    warmup.step()
                 total_chunks += 1
 
                 # free up memory
@@ -1192,30 +1235,81 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
             # Step here:
             torch.cuda.empty_cache()
         avg_loss = epoch_loss / trainloader.dataset.return_n_frames()
-        epoch_losses.append(avg_loss)
+        model.training_params["epoch_losses"].append(avg_loss)
+
+        if scheduler is not None:
+            scheduler.step()
+
+        if validationloader is not None:
+            val_loss = 0.0
+            model.eval()
+            with torch.no_grad():
+                for padded_imgs, padded_labels, lengths in trainloader:
+                    # Move everything to device once
+                    padded_imgs   = padded_imgs.to(device)   # [B, T, C, H, W]
+                    padded_labels = padded_labels.to(device) # [B, T, …]
+                    lengths       = lengths.to(device)       # [B]
+
+                    total_chunks = 0
+
+                    # iterate over each chunk of the sequence
+                    T = padded_imgs.size(1)
+                    total_chunks = T // chunk_size + (T % chunk_size > 0)
+                    membrane_potentials = []
+                    for t0 in range(0, T, chunk_size):
+                        t1 = min(t0 + chunk_size, T)
+                        imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
+                        labels_chunk = padded_labels[:, t0:t1] # [B, chunk, …]
+                        # adjust lengths for this chunk
+                        # mask out frames ≥ original length
+                        frame_idx = torch.arange(t0, t1, device=device).unsqueeze(0)  # [1, chunk]
+                        valid_mask = frame_idx < lengths.unsqueeze(1)                  # [B, chunk]
+
+                        # forward pass on just this chunk
+                        logits, new_mem = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
+                        membrane_potentials = [m.detach() for m in new_mem]
+
+                        loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values)
+
+
+                        val_loss += loss.item()
+                        if grad_clip: torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+                        if warmup is not None and epoch == 0:
+                            warmup.step()
+                        total_chunks += 1
+
+                        # free up memory
+                        del imgs_chunk, labels_chunk, logits, loss, valid_mask
+
+                    # Step here:
+                    torch.cuda.empty_cache()
+                avg_val_loss = val_loss / validationloader.dataset.return_n_frames()
+                model.training_params["validation_losses"].append(avg_val_loss)
+            print(f"Epoch {epoch+1}/{num_epochs}, Training Loss: {avg_loss:.4f}, Validation Loss: {avg_val_loss:.4f} pixels")
+        else:
+            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
+
+        if scheduler is not None:
+            print(f"Learning rate after epoch {epoch+1}: {scheduler.get_last_lr()[0]:.6f}")
+
         model.training_params["num_epochs"] += 1
+
         if epoch + 1 in save:
             save_model(model)
 
-        if validationloader is not None:
-            error = model.evaluate(validationloader, device, num_steps, print_results=True)
-            error = np.linalg.norm(error).item()
-            validation_errors.append(error)
-            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}, Validation Error: {error:.4f} pixels")
-        else:
-            print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
 
         # Plot loss vs. epochs
     if plot:
         plt.figure(figsize=(8, 5))
-        plt.plot(range(1, num_epochs+1), epoch_losses, marker='o')
+        plt.plot(range(1, num_epochs+1), model.training_params["epoch_losses"], marker='o')
         plt.xlabel("Epoch")
         plt.ylabel("Average Loss")
         plt.title("Training Loss vs. Epochs")
         plt.grid(True)
         if validationloader is not None:
             plt.figure(figsize=(8, 5))
-            plt.plot(range(1, num_epochs+1), validation_errors, marker='o')
+            plt.plot(range(1, num_epochs+1), model.training_params["validation_errors"], marker='o')
             plt.xlabel("Epoch")
             plt.ylabel("Validation Error")
             plt.title("Validation Error vs. Epochs")
@@ -1381,7 +1475,7 @@ def pinn_loss(model,
 
     return L_data + C * L_phys
 
-def classification_loss_w_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = True, alpha = 10): # Max_values is not used here, but it is used in the regression loss
+def classification_loss_w_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = False, alpha = 100): # Max_values is not used here, but it is used in the regression loss
     criterion_class = nn.CrossEntropyLoss()
     criterion_regression = nn.BCEWithLogitsLoss()
     conf_labels = labels[:, :, -1]
@@ -1400,7 +1494,7 @@ def classification_loss_w_confidence(model, outputs, labels, max_values = None, 
         conf_labels_valid = conf_labels[mask]
         conf_outputs_valid = conf_outputs[mask]
         loss_conf = criterion_regression(conf_outputs_valid, conf_labels_valid)
-        gate = conf_outputs_sig[mask] if gate_by_pred else conf_labels.squeeze(1)[mask]  # (B,)
+        gate = conf_outputs_sig[mask] if gate_by_pred else conf_labels[mask]  # (B,)
         for i, logit in enumerate(outputs):
             labels_valid = labels[mask][:, i].round().long()
             logit = logit.transpose(2, 1)
@@ -1417,6 +1511,48 @@ def classification_loss_w_confidence(model, outputs, labels, max_values = None, 
         # print('Loss conf', loss_conf.item(), 'cls_loss', cls_loss.item())
         total_loss = loss_conf + cls_loss
     del logit, labels_valid, logit_valid, loss_conf, cls_loss, conf_labels_valid, conf_outputs_valid, gate, loss, conf_labels, conf_outputs
+    return total_loss
+
+def classification_loss_without_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = False, alpha = 100): # Max_values is not used here, but it is used in the regression loss
+    criterion_class = nn.CrossEntropyLoss()
+    conf_labels = labels[:, :, -1]
+    outputs = outputs[:-1]
+    labels = labels[:, :, :-1]
+    cls_loss = 0
+    if mask is None:
+        for i, logit in enumerate(outputs):
+            loss = criterion_class(logit, labels[:,i].round().long())
+            cls_loss += loss
+        total_loss = cls_loss.mean()
+    else:
+        gate = conf_labels[mask]  # (B,)
+        for i, logit in enumerate(outputs):
+            labels_valid = labels[mask][:, i].round().long()
+            logit = logit.transpose(2, 1)
+            logit_valid = logit[mask]
+            loss = criterion_class(logit_valid, labels_valid.round().long())
+            # print('Loss', loss.mean(), gate.mean())
+            cls_loss += gate * loss
+        cls_loss = cls_loss.mean()
+        # print('Loss conf', loss_conf.item(), 'cls_loss', cls_loss.item())
+        total_loss = cls_loss
+    del logit, labels_valid, logit_valid, cls_loss, gate, loss, conf_labels
+    return total_loss
+
+def classification_loss_just_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = False): # Max_values is not used here, but it is used in the regression loss
+    criterion_regression = nn.BCEWithLogitsLoss()
+    conf_labels = labels[:, :, -1]
+    conf_outputs = outputs[-1].squeeze(1)
+    if mask is None:
+        loss_conf = criterion_regression(conf_outputs, conf_labels)
+        total_loss = loss_conf
+    else:
+        conf_labels_valid = conf_labels[mask]
+        conf_outputs_valid = conf_outputs[mask]
+        loss_conf = criterion_regression(conf_outputs_valid, conf_labels_valid)
+        # print('Loss conf', loss_conf.item(), 'cls_loss', cls_loss.item())
+        total_loss = loss_conf
+    del loss_conf,conf_labels_valid, conf_outputs_valid, conf_labels, conf_outputs
     return total_loss
 
 
@@ -1542,6 +1678,10 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
     model.eval()  # Set model to evaluation mode
     print("Evaluating video classification tracker")
     n_fields = len(testloader.dataset.labels)
+    if n_fields == 4:
+        confidence_flag = True
+    else:
+        confidence_flag = False
     all_errors = [[] for _ in range(n_fields)]
     all_gts = [[] for _ in range(n_fields)]
     all_preds = [[] for _ in range(n_fields)]
@@ -1569,6 +1709,11 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                 outputs, membrane_potentials = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
 
                 labels_valid = labels_chunk[valid_mask]
+                if confidence_flag:
+                    labels_valid, conf_labels_valid = labels_valid[:,:-1], labels_valid[:,-1]
+                    outputs, output_confidence = outputs[:-1], outputs[-1].squeeze(1)
+                    # print('Confidence', output_confidence.shape, 'Conf Labels', conf_labels_valid.shape)
+                    # print('Outputs', outputs[0].shape, 'Labels valid', labels_valid.shape)
                 for i, output in enumerate(outputs):
                     output = output.transpose(2, 1)
                     output_valid = output[valid_mask]
@@ -1578,6 +1723,14 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                     all_errors[i].extend(errors.cpu().tolist())
                     all_gts[i].extend(labels_valid[:, i].cpu().tolist())
                     all_preds[i].extend(pred.cpu().tolist())
+                if confidence_flag:
+                    # print('Confidence', padded_confidence_valid.shape)
+                    confidence_probs = torch.sigmoid(output_confidence)
+                    conf_probs_valid = confidence_probs[valid_mask]
+                    errors = torch.abs(conf_probs_valid - conf_labels_valid)
+                    all_errors[-1].extend(errors.cpu().tolist())
+                    all_gts[-1].extend(labels_valid[:, -1].cpu().tolist())
+                    all_preds[-1].extend(conf_probs_valid.cpu().tolist())
                 del outputs, labels_valid, errors, imgs_chunk, labels_chunk, valid_mask, output, pred
 
             torch.cuda.empty_cache()

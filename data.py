@@ -689,7 +689,6 @@ class Tracking3DVideoDataset(Dataset):
             if random.random() > 0.5 and self.rotation:
                 transformation = "rotate"
                 angle = random.uniform(-15, 15)
-
         video = []
         labels = []
 
@@ -728,30 +727,29 @@ class Tracking3DVideoDataset(Dataset):
 
                 # apply quantization to image
                 if self.quantization > 1:
-                    # h_q = H // self.quantization
-                    # w_q = W // self.quantization
+                    # h_q = H
+                    # w_q = W
                     # image_tensor = F.interpolate(
                     #     image_tensor.unsqueeze(0), 
                     #     size=(h_q, w_q), 
                     #     mode="bilinear", 
                     #     align_corners=False
                     # ).squeeze(0)
+
                     image_tensor = F.max_pool2d(
                         image_tensor.unsqueeze(0),            # add batch dim
                         kernel_size=self.quantization,
                         stride=self.quantization
                     ).squeeze(0)
+
                     # image_tensor = self.bilateral_downsample(image_tensor, scale=self.quantization)
 
             # 5) Data augmentation on this single frame
             if transformation == "hflip":
-                image_tensor = TF.hflip(image_tensor)
                 x = W - x
             elif transformation == "vflip":
-                image_tensor = TF.vflip(image_tensor)
                 y = H - y
             elif transformation == "rotate":
-                image_tensor = TF.rotate(image_tensor, angle)
                 cx, cy = W / 2, H / 2
                 ar = math.radians(angle)
                 x_new = math.cos(ar) * (x - cx) - math.sin(ar) * (y - cy) + cx
@@ -765,6 +763,12 @@ class Tracking3DVideoDataset(Dataset):
             video.append(image_tensor)
             labels.append(label)
         video = torch.stack(video, dim=0)  # [N_valid, 2, H', W']
+        if transformation == "hflip":
+            video = TF.hflip(video)
+        elif transformation == "vflip":
+            video = TF.vflip(video)
+        elif transformation == "rotate":
+            video = TF.rotate(video, angle)
         labels = torch.stack(labels, dim=0)  # [N_valid, N_labels]
         if not video_from_cache:
             self._video_cache[trajectory] = video  # cache the video tensor
@@ -912,7 +916,7 @@ def increase_contrast(tensor_img, factor):
     return torch.clamp((tensor_img - 0.5) * factor + 0.5, 0, 1)
 
 # Function to fetch and display the next image
-def show_next_img(gen):
+def show_next_img(gen, show_labels=True):
     idx, img, label, height, width = next(gen)  # Get next sample from generator
     img = increase_contrast(img, 5) # Increase contrast
     print(height, width)
@@ -921,10 +925,11 @@ def show_next_img(gen):
     img_np = tensor_to_image(img)
     plt.figure(figsize=(20, 20))
     plt.imshow(img_np, cmap='gray')
-    plt.scatter(label[0], height - label[1], c='r', label="Ground Truth")
-    if len(label) > 2: # Draw a circle with radius pred[2] and center (pred[0], pred[1])
-        true_circle = plt.Circle((label[0], height - label[1]), label[2], color='r', fill=False, label="True Radius")
-        plt.gca().add_artist(true_circle)
+    if show_labels:
+        plt.scatter(label[0], height - label[1], c='r', label="Ground Truth")
+        if len(label) > 2: # Draw a circle with radius pred[2] and center (pred[0], pred[1])
+            true_circle = plt.Circle((label[0], height - label[1]), label[2], color='r', fill=False, label="True Radius")
+            plt.gca().add_artist(true_circle)
     plt.title(f"Sample {idx}")
     plt.legend()
     plt.show()
