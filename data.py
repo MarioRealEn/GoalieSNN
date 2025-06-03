@@ -14,7 +14,7 @@ import numpy as np
 from torch.nn.utils.rnn import pad_sequence
 import matplotlib.pyplot as plt
 import time
-import kornia.filters as kfilters
+# import kornia.filters as kfilters
 
 
 DATASET_PREFIX_MAP = {
@@ -69,9 +69,9 @@ def get_chosen_indices_frames(data, split, train_ratio, val_ratio, seed, column_
 
 def get_chosen_indices_videos(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = None):
     if dataset_type == 'throws':
-        data = data[data['is_roll'] == False]
+        data = data[data['is_roll'] == False].reset_index(drop=True)
     elif dataset_type == 'rolls':
-        data = data[data['is_roll'] == True]
+        data = data[data['is_roll'] == True].reset_index(drop=True)
     elif dataset_type == 'all':
         pass
     else:
@@ -642,7 +642,7 @@ class Tracking3DVideoDataset(Dataset):
     def _load_full_video(self, trajectory_id):
         """Loads and caches the full video tensor for a given trajectory."""
         path = os.path.join(self.slices_dir, f"tr{trajectory_id}.avi")
-        cap  = cv2.VideoCapture(path, cv2.CAP_FFMPEG)
+        cap  = cv2.VideoCapture(path) #, cv2.CAP_FFMPEG)
         if not cap.isOpened():
             raise ValueError(f"Could not open video file: {path}")
 
@@ -661,8 +661,12 @@ class Tracking3DVideoDataset(Dataset):
         return t.permute(0, 3, 1, 2)             # [T, 2, H, W]
 
     def __getitem__(self, idx):
-        # 1) Determine trajectory and frame rows
+        # Determine trajectory
         trajectory = self.trajectories.iloc[idx]["tr"]
+        video, labels, length = self.__getitemtr__(trajectory)  # Ensure the trajectory is loaded
+        return video, labels, length
+
+    def __getitemtr__(self, trajectory):
         frames_video = self.positions[self.positions["tr"] == trajectory]
         if frames_video.empty:
             raise IndexError(f"No frames for trajectory {trajectory}")
@@ -736,11 +740,19 @@ class Tracking3DVideoDataset(Dataset):
                     #     align_corners=False
                     # ).squeeze(0)
 
-                    image_tensor = F.max_pool2d(
-                        image_tensor.unsqueeze(0),            # add batch dim
-                        kernel_size=self.quantization,
-                        stride=self.quantization
-                    ).squeeze(0)
+                    # image_tensor = F.max_pool2d(
+                    #     image_tensor.unsqueeze(0),            # add batch dim
+                    #     kernel_size=self.quantization,
+                    #     stride=self.quantization
+                    # ).squeeze(0)
+
+                    image_tensor = cv2.pyrDown(image_tensor.permute(1, 2, 0).numpy(),
+                                               dstsize=(W*2, H*2))
+                    image_tensor = cv2.pyrDown(image_tensor, dstsize=(W, H))
+
+                    image_tensor = torch.from_numpy(image_tensor).float()
+
+                    image_tensor = image_tensor.permute(2, 0, 1)  # [H, W, C] to [C, H, W]
 
                     # image_tensor = self.bilateral_downsample(image_tensor, scale=self.quantization)
 

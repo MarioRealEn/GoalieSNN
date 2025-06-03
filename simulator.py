@@ -759,8 +759,7 @@ class Camera():
         cam_point = world_point_hom.dot(self.T)
         epsilon = 1e-6
         if cam_point[1] < epsilon:
-            # If the point is effectively at or behind the camera, don't project it.
-            return None, None
+            print(f"Warning: Point {world_point} is behind the camera or too close to the focal plane.")
         # Perspective projection: (x, y) -> (f * x/y, f * z/y)
         x_proj = self.focal_length * (cam_point[0] / cam_point[1])
         y_proj = self.focal_length * (cam_point[2] / cam_point[1])

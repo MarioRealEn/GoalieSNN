@@ -1256,6 +1256,7 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
                     T = padded_imgs.size(1)
                     total_chunks = T // chunk_size + (T % chunk_size > 0)
                     membrane_potentials = []
+                    print_results_flag = False # Set this to False to avoid printing results
                     for t0 in range(0, T, chunk_size):
                         t1 = min(t0 + chunk_size, T)
                         imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
@@ -1269,8 +1270,8 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
                         logits, new_mem = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
                         membrane_potentials = [m.detach() for m in new_mem]
 
-                        loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values)
-
+                        loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values, print_results=print_results_flag)
+                        print_results_flag = False # Only print results for the first chunk
 
                         val_loss += loss.item()
                         if grad_clip: torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -1322,7 +1323,7 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
 ########################################################################        
 
 
-def classification_loss(model, outputs, labels, max_values = None, mask = None): # Max_values is not used here, but it is used in the regression loss
+def classification_loss(model, outputs, labels, max_values = None, mask = None, print_results = False): # Max_values is not used here, but it is used in the regression loss
     criterion = nn.CrossEntropyLoss()
     total_loss = 0
     if mask == None:
@@ -1344,6 +1345,8 @@ def classification_loss(model, outputs, labels, max_values = None, mask = None):
             logit_valid = logit[mask]
             # print(logit_valid.shape)
             loss = criterion(logit_valid, labels_valid.round().long())
+            if print_results: 
+                print(f"Loss for {model.labels[i]}: {loss.item()}")
             total_loss += loss
         del logit, labels_valid, logit_valid, loss
     return total_loss
@@ -1475,7 +1478,7 @@ def pinn_loss(model,
 
     return L_data + C * L_phys
 
-def classification_loss_w_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = False, alpha = 100): # Max_values is not used here, but it is used in the regression loss
+def classification_loss_w_confidence(model, outputs, labels, max_values = None, mask = None, gate_by_pred = False, alpha = 100, print_results = False): # Max_values is not used here, but it is used in the regression loss
     criterion_class = nn.CrossEntropyLoss()
     criterion_regression = nn.BCEWithLogitsLoss()
     conf_labels = labels[:, :, -1]
@@ -1504,10 +1507,14 @@ def classification_loss_w_confidence(model, outputs, labels, max_values = None, 
                 labels_valid,
                 reduction='none'
             )
-            # print('Loss', loss.mean(), gate.mean())
-            cls_loss += gate * loss
+            loss = gate * loss  # Apply gate to the loss
+            cls_loss += loss
+            if print_results:
+                print(f"Loss for {model.labels[i]}: {loss.mean().item()}")
         cls_loss = cls_loss.mean()
         loss_conf = alpha * loss_conf
+        if print_results:
+            print('Loss conf', loss_conf.item(), 'cls_loss', cls_loss.item())
         # print('Loss conf', loss_conf.item(), 'cls_loss', cls_loss.item())
         total_loss = loss_conf + cls_loss
     del logit, labels_valid, logit_valid, loss_conf, cls_loss, conf_labels_valid, conf_outputs_valid, gate, loss, conf_labels, conf_outputs
