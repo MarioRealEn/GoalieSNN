@@ -536,6 +536,7 @@ class Tracking3DVideoDataset(Dataset):
         crop_margins=False,
         labels = ["x_cam", "y_cam", "R_cam"]
     ):
+        print(f"Loading dataset from {dataset_path} with accumulation time {accumulation_time}ms")
         assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, "Train, val, and test ratios must sum to 1."
         self.split = split
         self.augment = augment
@@ -565,19 +566,18 @@ class Tracking3DVideoDataset(Dataset):
         self.trajectories = self.trajectories[self.trajectories['tr'].isin(trajectories)]
         print(f"Found {len(self.trajectories)} sequences in {csv_path}")
 
-        self.label_shape = None
-        video, _, _ = self.__getitem__(0)  # Test the first item to check for errors
+        video, labels, _ = self.__getitem__(0)  # Test the first item to check for errors
         img = video[0]
         self.image_shape = img.shape
+        self.n_fields = labels.shape[-1]
         print(f"Shape of the images: {self.image_shape}")
-        print(f"Label shape: {self.label_shape}")
+        print(f"Number of label fields: {self.n_fields}")
 
         self.trajectories, chosen_indices = get_chosen_indices_videos(self.trajectories, split, train_ratio, val_ratio, seed, column_name="tr", dataset_type=dataset_type)
 
         self.trajectories = self.trajectories.iloc[chosen_indices]
-        print(f"Final dataset split='{split}' size: {len(self.trajectories)}")
+        print(f"Final dataset split='{split}' size: {len(self.trajectories)}\n")
 
-        # For caching full videos (each entry is a [T,2,H,W] tensor)
 
     def __len__(self):
         return len(self.trajectories)
@@ -740,19 +740,19 @@ class Tracking3DVideoDataset(Dataset):
                     #     align_corners=False
                     # ).squeeze(0)
 
-                    # image_tensor = F.max_pool2d(
-                    #     image_tensor.unsqueeze(0),            # add batch dim
-                    #     kernel_size=self.quantization,
-                    #     stride=self.quantization
-                    # ).squeeze(0)
+                    image_tensor = F.max_pool2d(
+                        image_tensor.unsqueeze(0),            # add batch dim
+                        kernel_size=self.quantization,
+                        stride=self.quantization
+                    ).squeeze(0)
 
-                    image_tensor = cv2.pyrDown(image_tensor.permute(1, 2, 0).numpy(),
-                                               dstsize=(W*2, H*2))
-                    image_tensor = cv2.pyrDown(image_tensor, dstsize=(W, H))
+                    # image_tensor = cv2.pyrDown(image_tensor.permute(1, 2, 0).numpy(),
+                    #                            dstsize=(W*2, H*2))
+                    # image_tensor = cv2.pyrDown(image_tensor, dstsize=(W, H))
 
-                    image_tensor = torch.from_numpy(image_tensor).float()
+                    # image_tensor = torch.from_numpy(image_tensor).float()
 
-                    image_tensor = image_tensor.permute(2, 0, 1)  # [H, W, C] to [C, H, W]
+                    # image_tensor = image_tensor.permute(2, 0, 1)  # [H, W, C] to [C, H, W]
 
                     # image_tensor = self.bilateral_downsample(image_tensor, scale=self.quantization)
 

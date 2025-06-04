@@ -1177,6 +1177,8 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
     epoch_losses = []
     validation_errors = []
     max_values = [model.max_values[label] for label in trainloader.dataset.labels]
+    best_val = float('inf')
+    epochs_no_improve = 0
     for epoch in range(num_epochs):
         model.train()
         epoch_loss = 0.0
@@ -1237,14 +1239,11 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
         avg_loss = epoch_loss / trainloader.dataset.return_n_frames()
         model.training_params["epoch_losses"].append(avg_loss)
 
-        if scheduler is not None:
-            scheduler.step()
-
         if validationloader is not None:
             val_loss = 0.0
             model.eval()
             with torch.no_grad():
-                for padded_imgs, padded_labels, lengths in trainloader:
+                for padded_imgs, padded_labels, lengths in validationloader:
                     # Move everything to device once
                     padded_imgs   = padded_imgs.to(device)   # [B, T, C, H, W]
                     padded_labels = padded_labels.to(device) # [B, T, …]
@@ -1270,7 +1269,7 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
                         logits, new_mem = model((imgs_chunk, lengths), membrane_potentials, num_steps_per_image=num_steps)
                         membrane_potentials = [m.detach() for m in new_mem]
 
-                        loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values, print_results=print_results_flag)
+                        loss  = loss_function(model, logits, labels_chunk, mask=valid_mask, max_values=max_values)
                         print_results_flag = False # Only print results for the first chunk
 
                         val_loss += loss.item()
@@ -1291,30 +1290,41 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
         else:
             print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.4f}")
 
+        model.training_params["num_epochs"] += 1
+        
+        if val_loss < best_val - 1e-4:
+            best_val = val_loss
+            epochs_no_improve = 0
+            save_model(model, 'models/best_model_current_training.pt')
+        else:
+            epochs_no_improve += 1
+
+        if epochs_no_improve >= 25:
+            print(f"Early stopping at epoch {epoch+1}")
+            break
+
         if scheduler is not None:
+            try:
+                scheduler.step(avg_val_loss)
+            except:
+                raise ValueError("Scheduler step failed. Ensure the scheduler is compatible with the training loop (ReduceLROnPlateau).")
             print(f"Learning rate after epoch {epoch+1}: {scheduler.get_last_lr()[0]:.6f}")
 
-        model.training_params["num_epochs"] += 1
 
         if epoch + 1 in save:
             save_model(model)
 
-
         # Plot loss vs. epochs
     if plot:
         plt.figure(figsize=(8, 5))
-        plt.plot(range(1, num_epochs+1), model.training_params["epoch_losses"], marker='o')
+        plt.plot(range(1, epoch+2), model.training_params["epoch_losses"], marker='o', label = 'Taining Loss')
         plt.xlabel("Epoch")
         plt.ylabel("Average Loss")
-        plt.title("Training Loss vs. Epochs")
+        plt.title("Loss vs. Epochs")
         plt.grid(True)
         if validationloader is not None:
-            plt.figure(figsize=(8, 5))
-            plt.plot(range(1, num_epochs+1), model.training_params["validation_errors"], marker='o')
-            plt.xlabel("Epoch")
-            plt.ylabel("Validation Error")
-            plt.title("Validation Error vs. Epochs")
-            plt.grid(True)
+            plt.plot(range(1, epoch+2), model.training_params["validation_losses"], marker='o', label = 'Validation Loss')
+            plt.legend()
         plt.show()
 
 
@@ -1909,6 +1919,16 @@ def save_model(model, path = None):
     }, path)
     print(f"Model saved at {path}")
 
+def save_best_model(model_type, testloader, device, evaluate = True):
+    print("Loading best model...")
+    best_model = load_model('models/best_model_current_training.pt', model_type, testloader.dataset, device = device)
+    if evaluate:
+        print("Best model evaluation...")
+        error = best_model.evaluate(testloader, device, num_steps=best_model.training_params['num_steps'], print_results=True)
+        error_norm = np.linalg.norm(error).item()
+        print(f"Best model error: {error_norm}")
+    save_model(best_model)
+
 def measure_inference_time_per_image(model, dataloader, device, num_steps=10, num_batches=10):
     """
     Measure the average inference time per image for a given model and dataloader.
@@ -2076,3 +2096,27 @@ def invert_argmax(indices: torch.LongTensor,
     idx_expanded = indices.unsqueeze(dim)
     out.scatter_(dim, idx_expanded, 1.0)
     return out
+
+def freeze_all_except_given(model, layer_name):
+    for name, param in model.named_parameters():
+        param.requires_grad = name.startswith(f"fc_layers.{layer_name}") or name.startswith(f"lif_layers.{layer_name}")
+    print("Trainable parameters:")
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print("✓", name)
+
+def freeze_given(model, layer_name):
+    for name, param in model.named_parameters():
+        if name.startswith(f"fc_layers.{layer_name}") or name.startswith(f"lif_layers.{layer_name}"):
+            param.requires_grad = False
+        else:
+            param.requires_grad = True
+    print("Trainable parameters:")
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            print("✓", name)
+
+def unfreeze_all(model):
+    for name, param in model.named_parameters():
+        param.requires_grad = True
+    print("All parameters are trainable.")
