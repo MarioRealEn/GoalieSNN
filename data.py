@@ -67,7 +67,7 @@ def get_chosen_indices_frames(data, split, train_ratio, val_ratio, seed, column_
         raise ValueError("split must be 'train', 'val', 'test' or 'all'")
     return data, chosen_indices
 
-def get_chosen_indices_videos(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = None):
+def get_chosen_indices_videos(data, split, train_ratio, val_ratio, seed, column_name, dataset_type = "all", goal_type = "all"):
     if dataset_type == 'throws':
         data = data[data['is_roll'] == False].reset_index(drop=True)
     elif dataset_type == 'rolls':
@@ -76,12 +76,25 @@ def get_chosen_indices_videos(data, split, train_ratio, val_ratio, seed, column_
         pass
     else:
         raise ValueError("dataset_type must be 'throws', 'rolls' or 'all'")
+    
+    if goal_type == 'all':
+        pass
+    elif goal_type == 'out':
+        data = data[data['type'] == 'out'].reset_index(drop=True)
+    elif goal_type == 'in':
+        data = data[data['type'] == 'in'].reset_index(drop=True)
+    elif goal_type == 'almost_in':
+        data = data[data['type'] == 'almost_in'].reset_index(drop=True)
+    elif goal_type == 'towards_goal':
+        data = data[(data['type'] == 'in') | (data['type'] == 'almost_in')].reset_index(drop=True)
+    else:
+        raise ValueError("goal_type must be 'all', 'out', 'in', 'almost_in' or 'towards_goal'")
 
     total_size = len(data)
     indices = torch.randperm(total_size, generator=torch.Generator().manual_seed(seed))
     if split == "all":
         chosen_indices = indices
-        return chosen_indices
+        return data, chosen_indices
     train_end = int(train_ratio * total_size)
     val_end = train_end + int(val_ratio * total_size)
 
@@ -523,6 +536,7 @@ class Tracking3DVideoDataset(Dataset):
         accumulation_time,
         positions_csv = None,
         dataset_type="all",
+        goal_type="all",
         split="train",
         train_ratio=0.7,
         val_ratio=0.15,
@@ -532,7 +546,7 @@ class Tracking3DVideoDataset(Dataset):
         rotation=False,
         seed=42,
         quantization=1,
-        label_quantization=1,
+        label_quantization=None,
         crop_margins=False,
         labels = ["x_cam", "y_cam", "R_cam"]
     ):
@@ -551,12 +565,12 @@ class Tracking3DVideoDataset(Dataset):
         self.n_frames = None
         self._video_cache = {}
         self._label_cache = {}
-        if quantization < 1 or label_quantization < 1:
-            raise ValueError("Quantization factors must be >= 1")
-        if quantization > 1 and label_quantization == 1:
+        if quantization >= 1 and label_quantization is None:
             self.label_quantization = quantization
         else:
             self.label_quantization = label_quantization
+        if quantization < 1 or self.label_quantization < 1:
+            raise ValueError("Quantization factors must be >= 1")
 
         self.positions= pd.read_csv(csv_path)
         print(f"Loaded {len(self.positions)} rows from {csv_path}")
@@ -573,9 +587,9 @@ class Tracking3DVideoDataset(Dataset):
         print(f"Shape of the images: {self.image_shape}")
         print(f"Number of label fields: {self.n_fields}")
 
-        self.trajectories, chosen_indices = get_chosen_indices_videos(self.trajectories, split, train_ratio, val_ratio, seed, column_name="tr", dataset_type=dataset_type)
+        self.trajectories, chosen_indices = get_chosen_indices_videos(self.trajectories, split, train_ratio, val_ratio, seed, column_name="tr", dataset_type=dataset_type, goal_type=goal_type)
 
-        self.trajectories = self.trajectories.iloc[chosen_indices]
+        self.trajectories = self.trajectories.iloc[chosen_indices].reset_index(drop=True)
         print(f"Final dataset split='{split}' size: {len(self.trajectories)}\n")
 
 
@@ -791,6 +805,13 @@ class Tracking3DVideoDataset(Dataset):
         """Get the trajectory ID for a given index."""
         return self.trajectories.iloc[idx]["tr"]
     
+    def __getidx__(self, trajectory):
+        """Get the index of a trajectory in the dataset."""
+        idx = self.trajectories[self.trajectories["tr"] == trajectory].index
+        if len(idx) == 0:
+            raise ValueError(f"Trajectory {trajectory} not found in dataset")
+        return idx[0]
+    
     def __getcachesize__(self):
         """Get the size of the video cache."""
         size = 0
@@ -928,22 +949,30 @@ def increase_contrast(tensor_img, factor):
     return torch.clamp((tensor_img - 0.5) * factor + 0.5, 0, 1)
 
 # Function to fetch and display the next image
-def show_next_img(gen, show_labels=True):
+def show_next_img(gen, show_labels=True, quantization_factor=1, is_bgr=False, just_image=False):
     idx, img, label, height, width = next(gen)  # Get next sample from generator
     img = increase_contrast(img, 5) # Increase contrast
     print(height, width)
     print('max', img.max())
     print('min', img.min())
+    print("Label: ", label)
     img_np = tensor_to_image(img)
     plt.figure(figsize=(20, 20))
+    if is_bgr:
+        img_np = cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB)
     plt.imshow(img_np, cmap='gray')
     if show_labels:
-        plt.scatter(label[0], height - label[1], c='r', label="Ground Truth")
+        # plt.scatter(label[0] * quantization_factor, height - label[1] * quantization_factor, c='r', label="Ground Truth")
+        # Draw a yellow cross at the position of the label
+        plt.scatter(label[0] * quantization_factor, height - label[1] * quantization_factor, c='y', marker='+', s=200, label="Label Position", linewidths=3)
         if len(label) > 2: # Draw a circle with radius pred[2] and center (pred[0], pred[1])
-            true_circle = plt.Circle((label[0], height - label[1]), label[2], color='r', fill=False, label="True Radius")
+            true_circle = plt.Circle((label[0] * quantization_factor, (height - label[1]) * quantization_factor), label[2] * quantization_factor, color='yellow', fill=False, label="True Radius", linewidth=3)
             plt.gca().add_artist(true_circle)
-    plt.title(f"Sample {idx}")
-    plt.legend()
+    if just_image:
+        plt.axis('off')
+    else:
+        if show_labels: plt.legend()
+        plt.title(f"Sample {idx}")
     plt.show()
 
 def show_next_img_separate(gen, quantization = 1, label_quantization = 1): # This is for when the image and the labels have different quantizations, so the axis are different

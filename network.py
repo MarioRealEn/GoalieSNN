@@ -16,6 +16,9 @@ from scipy.stats import norm, rayleigh
 import time
 import data as dt
 from simulator import BALL_RADIUS, Camera, Field
+from tqdm import tqdm
+from statsmodels.stats.stattools import durbin_watson
+
 
 MAX_VAL_R_CAM = dt.MAX_VAL_R_CAM
 MAX_VAL_Y_CAM = dt.MAX_VAL_Y_CAM
@@ -50,13 +53,13 @@ focal_length = 0.008                             # Focal length in meters
 CAMERA = Camera(camera_pos, orientation, focal_length, img_width, img_height, fps = fps)
 
 
-class SCNN_Tracker2L(nn.Module):
+class SCNN2LImageClassification(nn.Module):
     def __init__(self, image_shape, bins_factor, beta=0.8, learn_threshold = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNN_Tracker2L, self).__init__()
-        self.model_type = 'Tracker2L'
+        super(SCNN2LImageClassification, self).__init__()
+        self.name = 'Tracker2L'
         # Convolutional layers (assuming 2-channel input for polarity split)
         self.beta = beta
         self.learn_threshold = learn_threshold
@@ -74,11 +77,11 @@ class SCNN_Tracker2L(nn.Module):
         channels, y_pixels, x_pixels = image_shape
         x_bins, y_bins = int(x_pixels*bins_factor), int(y_pixels*bins_factor)
         input_shape = (channels, y_pixels, x_pixels)
-        self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=2, padding=2)   # Expected: from (2, H, W) to (16, H/2, W/2)
+        self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=1, padding=2)   # Expected: from (2, H, W) to (16, H/2, W/2)
         self.lif1 = snn.Leaky(beta)
         self.mp1 = nn.MaxPool2d(2)
 
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1)  # Expected: (32, H/4, W/4)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)  # Expected: (32, H/4, W/4)
         self.lif2 = snn.Leaky(beta)
         self.mp2 = nn.MaxPool2d(2)
 
@@ -153,16 +156,16 @@ class SCNN_Tracker2L(nn.Module):
         outputs_y = outputs_y / num_steps
         
         # Apply softmax to get probabilities
-        probs_x = F.softmax(outputs_x, dim=1)
-        probs_y = F.softmax(outputs_y, dim=1)
+        # probs_x = F.softmax(outputs_x, dim=1)
+        # probs_y = F.softmax(outputs_y, dim=1)
         
-        return probs_x, probs_y#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
+        return outputs_x, outputs_y#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
     
     def start_training(self, trainloader, optimizer, device, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
         batch_size = trainloader.batch_size
         loss_function = classification_loss
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -180,14 +183,144 @@ class SCNN_Tracker2L(nn.Module):
     def evaluate(self, testloader, device, num_steps, print_results=False):
         return evaluate_classification_tracker(self, testloader, device, num_steps, print_results)
 
-class SCNNImageClassification(nn.Module):
+class SCNN2LImageRegression(nn.Module):
+    def __init__(self, image_shape, beta=0.8, learn_threshold = False):
+        """
+        input_shape: tuple (channels, height, width) of input event data.
+        """
+        super(SCNN2LImageRegression, self).__init__()
+        self.name = 'Tracker2L'
+        # Convolutional layers (assuming 2-channel input for polarity split)
+        self.beta = beta
+        self.learn_threshold = learn_threshold
+        self.image_shape = image_shape
+        self.max_values = {
+            'X': self.image_shape[2],
+            'Y': self.image_shape[1],
+            'Radius': MAX_VAL_R_CAM,
+            'x_cam': self.image_shape[2],
+            'y_cam': MAX_VAL_Y_CAM,
+            'R_cam': MAX_VAL_R_CAM
+        }
+
+        # Convolutional layers (assuming 2-channel input for polarity split)
+        channels, y_pixels, x_pixels = image_shape
+        self.input_shape = (channels, y_pixels, x_pixels)
+        self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=1, padding=2)   # Expected: from (2, H, W) to (16, H/2, W/2)
+        self.lif1 = snn.Leaky(beta)
+        self.mp1 = nn.MaxPool2d(2)
+
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)  # Expected: (32, H/4, W/4)
+        self.lif2 = snn.Leaky(beta)
+        self.mp2 = nn.MaxPool2d(2)
+
+        # Dynamically compute the flattened feature size by passing a dummy input.
+        self.flattened_size = self._get_flattened_size(self.input_shape)
+        print(f"Flattened feature size: {self.flattened_size}")
+        
+        # Two fully connected branches: one for x-coordinate, one for y-coordinate
+        self.fc_x = nn.Linear(self.flattened_size, 1)
+        self.lif_x = snn.Leaky(beta)
+        self.fc_y = nn.Linear(self.flattened_size, 1)
+        self.lif_y = snn.Leaky(beta)
+        
+        # Surrogate gradient activation (spiking behavior simulation) IDK WHAT THIS IS
+        # self.spike_fn = surrogate.fast_sigmoid(slope=25)
+
+    def _get_flattened_size(self, input_shape):
+        # Create a dummy input tensor with the given shape.
+        with torch.no_grad():
+            x = torch.zeros(1, *input_shape)
+            x = self.conv1(x)
+            x = self.mp1(x)
+            x = self.conv2(x)
+            x = self.mp2(x)
+            flattened_size = x.view(1, -1).size(1)
+        return flattened_size
+
+    def forward(self, x, num_steps=10):
+        """
+        x: input tensor of shape [batch, channels, height, width]
+        num_steps: number of simulation time steps (simulate repeated evaluation to mimic spiking dynamics)
+        """
+        # Initialize hidden states
+        mem1 = self.lif1.init_leaky()
+        mem2 = self.lif2.init_leaky()
+        mem_x = self.lif_x.init_leaky()
+        mem_y = self.lif_y.init_leaky()
+
+        # Record final layer
+        spk_x_rec = []
+        spk_y_rec = []
+        mem_x_rec = []
+        mem_y_rec = []
+
+        batch_size = x.size(0)
+        outputs_x = 0
+        outputs_y = 0
+        for step in range(num_steps):
+            # Convolutional layers with spiking activations
+            x1 = self.conv1(x)
+            spk1, mem1 = self.lif1(self.mp1(x1), mem1)
+            
+            x2 = self.conv2(spk1)
+            spk2, mem2 = self.lif2(self.mp2(x2), mem2)
+            
+            # Flatten features
+            s2_flat = spk2.view(batch_size, -1)
+            # Fully connected branches for x and y
+            out_x = self.fc_x(s2_flat)
+            spk_x = self.lif_x(out_x, mem_x)
+            out_y = self.fc_y(s2_flat)
+            spk_y = self.lif_y(out_y, mem_y)
+            # Record spiking activity and membrane potential for the final layer
+            spk_x_rec.append(spk_x)
+            spk_y_rec.append(spk_y)
+            mem_x_rec.append(mem_x)
+            mem_y_rec.append(mem_y)
+            outputs_x += out_x
+            outputs_y += out_y
+        # Average over time steps
+        outputs_x = outputs_x / num_steps
+        outputs_y = outputs_y / num_steps
+        
+        # Apply softmax to get probabilities
+        # probs_x = F.softmax(outputs_x, dim=1)
+        # probs_y = F.softmax(outputs_y, dim=1)
+        
+        return outputs_x, outputs_y#, [spk_x_rec, spk_y_rec, mem_x_rec, mem_y_rec]
+    
+    def start_training(self, trainloader, optimizer, device, validationloader = None, num_steps = 10, num_epochs=20, plot = True):
+        batch_size = trainloader.batch_size
+        loss_function = regression_loss
+        self.training_params = {
+            "type": self.name,
+            "batch_size": batch_size,
+            "num_steps": num_steps,
+            "loss_function": loss_function.__name__,
+            "optimizer": optimizer,
+            "learning_rate": optimizer.param_groups[0]['lr'],
+            "num_epochs": num_epochs,
+            "quantization": trainloader.dataset.quantization,
+            "label_quantization": trainloader.dataset.label_quantization,
+            "beta": self.beta,
+            "learn_threshold": self.learn_threshold,
+            "image_shape": self.image_shape,
+            }
+        training_loop_images(self, trainloader, optimizer, device, loss_function, validationloader, num_steps, num_epochs, plot=plot)
+    
+    def evaluate(self, testloader, device, num_steps, print_results=False):
+        return evaluate_regression_tracker(self, testloader, device, num_steps, print_results)
+
+
+class SCNN3LImageClassification(nn.Module):
     def __init__(self, image_shape, bins_factor, beta=0.8, learn_threshold = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNNImageClassification, self).__init__()
+        super(SCNN3LImageClassification, self).__init__()
 
-        self.model_type = 'ImageClassification'
+        self.name = 'ImageClassification'
         self.task = 'classification'
         self.beta = beta
         self.learn_threshold = learn_threshold
@@ -296,7 +429,7 @@ class SCNNImageClassification(nn.Module):
         batch_size = trainloader.batch_size
         loss_function = classification_loss
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -477,12 +610,12 @@ class SCNNImageClassWAvg(nn.Module):
     def evaluate(self, testloader, device, num_steps, print_results=False):
         return evaluate_regression_tracker(self, testloader, device, num_steps, print_results)
 
-class SCNNImageRegression(nn.Module):
+class SCNN3LImageRegression(nn.Module):
     def __init__(self, image_shape, beta=0.8, learn_threshold = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
-        super(SCNNImageRegression, self).__init__()
+        super(SCNN3LImageRegression, self).__init__()
 
         self.name = 'ImageRegression'
         self.task = 'regression'
@@ -622,7 +755,7 @@ class SCNN_Tracker_Class_GASP(nn.Module): # Three conv layers
         """
         super(SCNN_Tracker_Class_GASP, self).__init__()
 
-        self.model_type = 'TrackerClassGASP'
+        self.name = 'TrackerClassGASP'
         self.learn_threshold = learn_threshold
         self.beta = beta
         self.image_shape = image_shape
@@ -726,7 +859,7 @@ class SCNN_Tracker_Class_GASP(nn.Module): # Three conv layers
         batch_size = trainloader.batch_size
         loss_function = classification_loss
         self.training_params = {
-            "type": self.model_type,
+            "type": self.name,
             "batch_size": batch_size,
             "num_steps": num_steps,
             "loss_function": loss_function.__name__,
@@ -745,7 +878,7 @@ class SCNN_Tracker_Class_GASP(nn.Module): # Three conv layers
         return evaluate_video_classification_tracker(self, testloader, device, num_steps, print_results)
     
 class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
-    def __init__(self, trainset, beta=0.8, learn_threshold = False, weighted_avg = False):
+    def __init__(self, trainset, beta=0.8, learn_threshold = False, weighted_avg = False, dropout = False):
         """
         input_shape: tuple (channels, height, width) of input event data.
         """
@@ -787,6 +920,10 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)  # Expected: (64, H/8, W/8)
         self.lif3 = snn.Leaky(beta, learn_threshold=learn_threshold)
         self.mp3 = nn.MaxPool2d(2)
+
+        self.has_dropout = dropout
+        if self.has_dropout:
+            self.dropout = nn.Dropout(p=0.5)   # drop 50% of units
 
         # Dynamically compute the flattened feature size by passing a dummy input.
         self.flattened_size = self._get_flattened_size(input_shape)
@@ -871,6 +1008,7 @@ class SCNNVideoClassification(nn.Module): # Based on the SCNN_Tracker3L
                 
                 # Flatten features
                 s3_flat = spk3.view(spk3.size(0), -1)
+                if self.has_dropout: s3_flat = self.dropout(s3_flat) # Dropping out 30% of the features for regularization
                 
                 for j, label in enumerate(self.labels):
                     fc_out = self.fc_layers[label](s3_flat)
@@ -1056,9 +1194,9 @@ class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
                 # Flatten features
                 s3_flat = spk3.view(spk3.size(0), -1)
                 # Fully connected branches for x and y
-                out_x = self.fc_x(s3_flat)
-                out_y = self.fc_y(s3_flat)
-                out_z = self.fc_z(s3_flat)
+                out_x = torch.sigmoid(self.fc_x(s3_flat))
+                out_y = torch.sigmoid(self.fc_y(s3_flat))
+                out_z = torch.sigmoid(self.fc_z(s3_flat))
 
                 outputs_x += out_x
                 outputs_y += out_y
@@ -1137,7 +1275,7 @@ def training_loop_images(model, trainloader, optimizer, device, loss_function, v
             loss = loss_function(model, logits, labels, max_values=max_values)
             
             loss.backward()
-            if model.grad_clipping: torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if hasattr(model, "grad_clipping") and model.grad_clipping: torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             epoch_loss += loss.item()
@@ -1332,9 +1470,18 @@ def training_loop_videos(model, trainloader, optimizer, device, loss_function, v
 #                       LOSS FUNCTIONS                                 #
 ########################################################################        
 
+def ordinal_loss_criterion(logits, y):
+    # logits: [B, K-1] ;  y: [B] integer classes
+    K_minus_1 = logits.size(1)
+    # build target matrix t(y) in one line
+    targets = (torch.arange(K_minus_1, device=y.device)[None, :] < y[:, None]).float()
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    return bce.sum(dim=1).mean()   
+
 
 def classification_loss(model, outputs, labels, max_values = None, mask = None, print_results = False): # Max_values is not used here, but it is used in the regression loss
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
+    criterion = ordinal_loss_criterion if hasattr(model, "ordinal") and model.ordinal else nn.CrossEntropyLoss(label_smoothing=0.3) # label_smoothing is used to avoid overfitting to the training set
     total_loss = 0
     if mask == None:
         # loss_x = criterion(logits_x, labels_x.round().long())
@@ -1591,58 +1738,130 @@ def logits_to_weighted_avg(logits):
         weighted_vars.append(weighted_var)
     return weighted_vars
 
-def plot_error_distribution(errors, n_bins=5, fields = ['x', 'y', 'R']):
+# def plot_error_distribution(errors, n_bins=10, fields = ['x', 'y', 'R']):
 
-    total_errors = np.linalg.norm(errors, axis=0)
+#     total_errors = np.linalg.norm(errors, axis=0)
     
-    # Add epsilon to avoid zero values
-    epsilon = 1e-9
-    total_errors_safe = total_errors + epsilon
+#     # Add epsilon to avoid zero values
+#     epsilon = 1e-9
+#     total_errors_safe = total_errors + epsilon
 
-    # Create plot
+#     # Create plot
+#     plt.figure(figsize=(12, 6))
+#     # Calculate 95% confidence intervals
+#     confidence_level = 0.95
+#     z_score = norm.ppf(confidence_level)  # For normal distributions
+
+#     for i in range(len(errors)):
+#         # Fit normal distributions to X/Y errors
+#         mu, std = norm.fit(errors[i])
+#         ci = mu + z_score * std
+#         field = fields[i]
+#         print(f"Error {i}: μ={mu:.2f}, σ={std:.2f}, 95% CI={ci:.3f} pixels")
+#         # Plot histogram
+#         plt.hist(errors[i], bins=n_bins, alpha=0.5, density=True, label=f'Error {field}', color='C'+str(i))
+#         # Generate x values for the normal distribution
+#         # x = np.linspace(min(errors[i]), max(errors[i]), 1000)
+#         x = np.linspace(min(errors[i]), 60, 1000)
+#         # Plot the normal distribution
+#         plt.plot(x, norm.pdf(x, mu, std), 'r--', lw=2, label=f'{field} fit: μ={mu:.2f}, σ={std:.2f}')
+#         # Plot 95% CI lines
+#         plt.axvline(ci, color='red', linestyle=':', linewidth=2, label=f'{field} 95% CI: {ci:.3f}')
+
+
+#     # Fit Rayleigh distribution to total error
+#     # rayleigh_params = rayleigh.fit(total_errors_safe, floc=0)  # Fix location at 0
+#     # scale_total = rayleigh_params[1]  # Scale parameter (σ) of Rayleigh distribution
+#     # ci_total = rayleigh.ppf(confidence_level, scale=scale_total)  # Rayleigh CI
+
+#     # print(f"Total errors: σ={scale_total:.2f}, 95% CI={ci_total:.3f} pixels")
+
+#     # plt.hist(total_errors_safe, bins=n_bins, alpha=0.5, density=True, label='Total errors', color='blue')
+
+#     # x_total = np.linspace(0, max(total_errors_safe), 1000)  # Rayleigh starts at 0
+#     # plt.plot(x_total, rayleigh.pdf(x_total, scale=scale_total), 'b--', lw=2, 
+#     #         label=f'Total fit: σ={scale_total:.2f}')
+
+#     # plt.axvline(ci_total, color='blue', linestyle=':', linewidth=2, 
+#     #             label=f'Total 95% CI: {ci_total:.3f}')
+
+#     plt.xlabel('Error')
+#     plt.ylabel('Probability Density')
+#     plt.title('Error Distribution with 95% Confidence Intervals')
+#     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+#     plt.grid(True)
+#     plt.tight_layout()
+
+
+def plot_error_distribution(errors, n_bins=30, fields=['x', 'y', 'R']):
+    # Define bins over [-60, 60]
+    bins = np.linspace(-60, 60, n_bins + 1)
+    
+    # Colors for each field
+    colors = ['C0', 'C1', 'C2']
+    
+    # Setup figure
     plt.figure(figsize=(12, 6))
-    # Calculate 95% confidence intervals
     confidence_level = 0.95
-    z_score = norm.ppf(confidence_level)  # For normal distributions
-
-    for i in range(len(errors)):
-        # Fit normal distributions to X/Y errors
-        mu, std = norm.fit(errors[i])
-        ci = mu + z_score * std
+    z_score = norm.ppf((1 + confidence_level) / 2)   # two‐sided
+    
+    # X‐axis values for full Gaussian curve
+    x_vals = np.linspace(-60, 60, 1000)
+    
+    for i, errs in enumerate(errors):
+        mu, std = norm.fit(errs)
+        ci_low  = mu - z_score * std
+        ci_high = mu + z_score * std
         field = fields[i]
-        print(f"Error {i}: μ={mu:.2f}, σ={std:.2f}, 95% CI={ci:.3f} pixels")
-        # Plot histogram
-        plt.hist(errors[i], bins=n_bins, alpha=0.5, density=True, label=f'Error {field}', color='C'+str(i))
-        # Generate x values for the normal distribution
-        x = np.linspace(min(errors[i]), max(errors[i]), 1000)
-        # Plot the normal distribution
-        plt.plot(x, norm.pdf(x, mu, std), 'r--', lw=2, label=f'{field} fit: μ={mu:.2f}, σ={std:.2f}')
-        # Plot 95% CI lines
-        plt.axvline(ci, color='red', linestyle=':', linewidth=2, label=f'{field} 95% CI: {ci:.3f}')
+        
+        print(f"Error {field}: μ={mu:.2f}, σ={std:.2f}, 95% CI=[{ci_low:.2f}, {ci_high:.2f}] pixels")
+        print(f"Durbin–Watson {field}: {durbin_watson(errs):.2f}")
+        
+        # Histogram
+        plt.hist(errs, bins=bins, alpha=0.4, density=True,
+                 label=f'{field} errors', color=colors[i])
+        
+        # Full Gaussian PDF
+        plt.plot(x_vals, norm.pdf(x_vals, mu, std),
+                 linestyle='--', linewidth=2,
+                 label=f'{field} fit (μ={mu:.2f}, σ={std:.2f})',
+                 color=colors[i])
+        
+        # CI bounds
+        plt.axvline(ci_low,  color=colors[i], linestyle=':', linewidth=2,
+                    label=f'{field} –1σ bound')
+        plt.axvline(ci_high, color=colors[i], linestyle=':', linewidth=2,
+                    label=f'{field} +1σ bound')
+    
+#     # Fit Rayleigh distribution to total error
+#     # rayleigh_params = rayleigh.fit(total_errors_safe, floc=0)  # Fix location at 0
+#     # scale_total = rayleigh_params[1]  # Scale parameter (σ) of Rayleigh distribution
+#     # ci_total = rayleigh.ppf(confidence_level, scale=scale_total)  # Rayleigh CI
 
+#     # print(f"Total errors: σ={scale_total:.2f}, 95% CI={ci_total:.3f} pixels")
 
-    # Fit Rayleigh distribution to total error
-    rayleigh_params = rayleigh.fit(total_errors_safe, floc=0)  # Fix location at 0
-    scale_total = rayleigh_params[1]  # Scale parameter (σ) of Rayleigh distribution
-    ci_total = rayleigh.ppf(confidence_level, scale=scale_total)  # Rayleigh CI
+#     # plt.hist(total_errors_safe, bins=n_bins, alpha=0.5, density=True, label='Total errors', color='blue')
 
-    print(f"Total errors: σ={scale_total:.2f}, 95% CI={ci_total:.3f} pixels")
+#     # x_total = np.linspace(0, max(total_errors_safe), 1000)  # Rayleigh starts at 0
+#     # plt.plot(x_total, rayleigh.pdf(x_total, scale=scale_total), 'b--', lw=2, 
+#     #         label=f'Total fit: σ={scale_total:.2f}')
 
-    plt.hist(total_errors_safe, bins=n_bins, alpha=0.5, density=True, label='Total errors', color='blue')
+#     # plt.axvline(ci_total, color='blue', linestyle=':', linewidth=2, 
+#     #             label=f'Total 95% CI: {ci_total:.3f}')
 
-    x_total = np.linspace(0, max(total_errors_safe), 1000)  # Rayleigh starts at 0
-    plt.plot(x_total, rayleigh.pdf(x_total, scale=scale_total), 'b--', lw=2, 
-            label=f'Total fit: σ={scale_total:.2f}')
+    # Finalize plot limits and labels
+    # plt.xlim( 0, 60)
 
-    plt.axvline(ci_total, color='blue', linestyle=':', linewidth=2, 
-                label=f'Total 95% CI: {ci_total:.3f}')
-
-    plt.xlabel('Error')
+    # Labels & legend
+    plt.xlabel('Error (pixels)')
     plt.ylabel('Probability Density')
-    plt.title('Error Distribution with 95% Confidence Intervals')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.title('Full Gaussian Fits to Error Distributions')
+    plt.xlim(-60, 60)
+    plt.legend(bbox_to_anchor=(1.02, 1), loc='upper left')
     plt.grid(True)
     plt.tight_layout()
+    plt.show()
+
 
 
 def evaluate_classification_tracker(model, testloader, device, num_steps=10, print_results=True, operation="mean"):
@@ -1713,6 +1932,7 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
             # iterate over each chunk of the sequence
             T = padded_imgs.size(1)
             membrane_potentials = []
+            printed = True
             for t0 in range(0, T, chunk_size):
                 t1 = min(t0 + chunk_size, T)
                 imgs_chunk   = padded_imgs[:, t0:t1]   # [B, chunk, C, H, W]
@@ -1735,7 +1955,11 @@ def evaluate_video_classification_tracker(model, testloader, device, num_steps=1
                     output = output.transpose(2, 1)
                     output_valid = output[valid_mask]
                     pred = torch.argmax(output_valid, dim=1)
-                    errors = torch.abs(pred.squeeze(-1) - labels_valid[:, i])
+                    if not printed:
+                        print('Pred', pred, 'Labels valid', labels_valid[:, i])
+                        printed = True
+                    # errors = torch.abs(pred.squeeze(-1) - labels_valid[:, i])
+                    errors = pred.squeeze(-1) - labels_valid[:, i]
                     # print('Errors', errors.shape)
                     all_errors[i].extend(errors.cpu().tolist())
                     all_gts[i].extend(labels_valid[:, i].cpu().tolist())
@@ -1967,7 +2191,7 @@ def measure_inference_time_per_image(model, dataloader, device, num_steps=10, nu
     print(f"Average inference time per image over {num_batches} batches: {avg_time_per_image:.6f} seconds")
     return avg_time_per_image
 
-def measure_inference_time_per_image_for_videos(model, dataloader, device, num_steps=10, num_batches=10):
+def measure_inference_time_per_image_for_videos_old(model, dataloader, device, num_steps=10, num_batches=10):
     """
     Measure the average inference time per image for a given model and dataloader.
     
@@ -2016,6 +2240,77 @@ def measure_inference_time_per_image_for_videos(model, dataloader, device, num_s
     print(f"Average inference time per image over {num_batches} batches: {avg_time_per_image:.6f} seconds")
     return avg_time_per_image
 
+def measure_inference_time_per_image_for_videos(
+    model,
+    dataloader,
+    device,
+    num_steps: int = 10,
+    num_batches: int = 10,
+    chunk_size: int = CHUNK_SIZE
+) -> float:
+    """
+    Measure the average inference time per *valid* image for a video-based model,
+    using the same chunked iteration and membrane_potentials state as in your
+    evaluate_video_classification_tracker loop.
+
+    Args:
+        model:               trained PyTorch model (expects (imgs, lengths), state, num_steps_per_image=...)
+        dataloader:          DataLoader yielding (padded_imgs, _, lengths)
+        device:              torch.device
+        num_steps:           number of simulation steps per image
+        num_batches:         how many batches to time
+        chunk_size:          max frames to process in one forward-pass chunk
+
+    Returns:
+        avg_time_per_image:  average time (s) across all *valid* images
+    """
+    model.eval()
+    per_image_times = []
+
+    with torch.no_grad():
+        for batch_idx, (padded_imgs, _, lengths) in enumerate(dataloader):
+            if batch_idx >= num_batches:
+                break
+
+            # move to device
+            padded_imgs = padded_imgs.to(device)    # [B, T, C, H, W]
+            lengths     = lengths.to(device)        # [B]
+
+            # reset state
+            membrane_potentials = []
+
+            # timing start
+            start_t = time.perf_counter()
+
+            # chunked forward
+            B, T, C, H, W = padded_imgs.shape
+            for t0 in range(0, T, chunk_size):
+                t1 = min(t0 + chunk_size, T)
+                imgs_chunk = padded_imgs[:, t0:t1]  # [B, chunk, C, H, W]
+
+                # forward pass
+                _, membrane_potentials = model(
+                    (imgs_chunk, lengths),
+                    membrane_potentials,
+                    num_steps_per_image=num_steps
+                )
+
+            # ensure all kernels are done
+            if device == "cuda":
+                torch.cuda.synchronize()
+
+            end_t = time.perf_counter()
+
+            # how many *valid* frames in this batch?
+            images_in_batch = lengths.sum().item()
+            per_image_times.append((end_t - start_t) / images_in_batch)
+            del imgs_chunk, membrane_potentials, lengths, padded_imgs
+
+    avg_time = sum(per_image_times) / len(per_image_times)
+    print(f"Average inference time per image over {len(per_image_times)} batches: "
+          f"{avg_time:.6f} s")
+    return avg_time
+
 def load_model(path, model_class, trainset, device):
     checkpoint = torch.load(path)
     # Create model instance with the same parameters as the saved model
@@ -2029,26 +2324,93 @@ def load_model(path, model_class, trainset, device):
     model.to(device)
     return model
 
-def get_preds_video_regression(model, video, length, labels, device, num_steps=20, weighted_avg = False): # This one shows also the prediction from the model
+def get_preds_video_regression(model, video, length, labels, device, num_steps=10, weighted_avg = False): # This one shows also the prediction from the model
     """Generator that yields images, labels, and predictions given one sequence of images."""
     model.eval()
     membrane = []
     with torch.no_grad():
         outputs, membrane = model((video.unsqueeze(0).to(device), torch.tensor([length])), membrane, num_steps_per_image=num_steps)
-        print(len(outputs))
         if weighted_avg:
             outputs = logits_to_weighted_avg(outputs)
-            print(len(outputs))
         preds = []
         max_values = [model.max_values[label] for label in labels]
         for _, (output, max_val) in enumerate(zip(outputs, max_values)):
-            print(output.shape)
             pred = output * max_val
-            print(pred.shape)
             preds.append(pred.squeeze(0).cpu().numpy())
         preds = np.array(preds)
         print(preds.shape)
     return preds
+
+def get_preds_all_videos(
+    model,
+    dataloader,
+    device,
+    num_steps: int = 10,
+    weighted_avg: bool = False,
+    chunk_size: int = CHUNK_SIZE
+):
+    """
+    Returns:
+      all_preds  : list of length N, each an array of shape [T_i, H]
+      all_labels : list of length N, each an array of shape [T_i, H]
+
+    where N = number of videos, T_i = true length of video i,
+    H = number of heads (e.g. x, y, in_fov, ...).
+    """
+    model.eval()
+    all_preds  = []
+    # how many heads?
+    H = len(dataloader.dataset.labels)
+
+    with torch.no_grad():
+        for padded_imgs, padded_labels, lengths in tqdm(dataloader, desc="Predicting"):
+            B, T = padded_imgs.shape[:2]
+
+            imgs   = padded_imgs.to(device)          # [B, T, C, H, W]
+            lengths = lengths.to(device)             # [B]
+
+            # container for this batch: [B, H, T]
+            preds_batch = torch.zeros((B, H, T), dtype=torch.long, device=device)
+            mems = []  # reset membrane potentials at start of batch
+
+            # forward in chunks
+            for t0 in range(0, T, chunk_size):
+                t1 = min(t0 + chunk_size, T)
+                chunk = imgs[:, t0:t1]               # [B, chunk, C, H, W]
+
+                logits_list, mems = model(
+                    (chunk, lengths),
+                    mems,
+                    num_steps_per_image=num_steps
+                )
+                # logits_list is a list of length H:
+                #   logits_list[h] has shape [B, n_bins_h, chunk]
+                for h, logits in enumerate(logits_list):
+                    # class prediction per time-step
+                    if weighted_avg:
+                        pred_chunk = logits_to_weighted_avg(logits)
+                    else:
+                        pred_chunk = torch.argmax(logits, dim=1)   # [B, chunk]
+                    preds_batch[:, h, t0:t1] = pred_chunk
+
+            # now split out each video up to its true length
+            # create a boolean mask [B, T]
+            mask_full = (torch.arange(T, device=device)[None, :] 
+                         < lengths[:, None])
+
+            for b in range(B):
+                L = lengths[b].item()
+                mask = mask_full[b]  # [T] boolean
+
+                # take only the valid time-steps
+                preds_i = preds_batch[b, :, mask].cpu().numpy()   # [H, L]
+
+                all_preds.append(preds_i)
+
+    return all_preds # (N, H, T)
+
+
+
 
 def get_preds_video_classification(model, video, length, labels, device, num_steps=20): # This one shows also the prediction from the model
     model.eval()

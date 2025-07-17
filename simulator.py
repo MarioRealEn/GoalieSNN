@@ -749,25 +749,45 @@ class Camera():
         theta = np.arctan2(norm_direction[2], np.sqrt(norm_direction[0]**2 + norm_direction[1]**2))
         return theta, phi
 
-    def project_point(self, world_point):
+    def project_point(self, world_points):
         """
-        Projects a 3D world point into 2D image pixel coordinates using a simple pinhole camera model.
-        Returns (u, v) pixel coordinates and the depth (z in camera coordinates).
+        Projects 3D world point(s) into 2D pixel coords + depth.
+        Accepts:
+        - world_points: shape (3,) or (N,3)
+        Returns:
+        - uv:   shape (2,) if input was (3,), or (N,2) if input was (N,3)
+        - depth: scalar if input was (3,), or (N,) if input was (N,3)
         """
-        # Transform to camera coordinates:
-        world_point_hom = np.hstack([world_point, np.array([1])])  # Convert to homogeneous coordinates
-        cam_point = world_point_hom.dot(self.T)
-        epsilon = 1e-6
-        if cam_point[1] < epsilon:
-            print(f"Warning: Point {world_point} is behind the camera or too close to the focal plane.")
-        # Perspective projection: (x, y) -> (f * x/y, f * z/y)
-        x_proj = self.focal_length * (cam_point[0] / cam_point[1])
-        y_proj = self.focal_length * (cam_point[2] / cam_point[1])
-        # print(f"Camera coordinates: {cam_point}, Projected coordinates: ({x_proj}, {y_proj})")
-        # Convert to pixel coordinates (origin at bottom-left; center of image is at (img_width/2, img_height/2))
-        u = int(self.img_width / 2 + x_proj)
-        v = int(self.img_height / 2 - y_proj)  # Invert y-axis for image coordinates
-        return np.array([u, v]), cam_point[1]
+        pts = np.asarray(world_points)
+        single = (pts.ndim == 1)
+        pts = np.atleast_2d(pts)             # now (M,3)
+        ones = np.ones((pts.shape[0], 1))    # (M,1)
+        world_hom = np.hstack([pts, ones])   # (M,4)
+
+        # Transform to camera coords:
+        cam_pts = world_hom.dot(self.T)      # (M,4)
+        depths = cam_pts[:,1]                # using y as depth
+
+        # Avoid division by zero / behind-camera:
+        eps = 1e-6
+        valid = depths > eps
+        cam_pts = cam_pts[valid]
+        depths = depths[valid]
+
+        # Pinhole projection:
+        x_proj = self.focal_length * (cam_pts[:,0] / depths)
+        y_proj = self.focal_length * (cam_pts[:,2] / depths)
+
+        # To pixel coords:
+        u = (self.img_width  / 2 + x_proj).astype(int)
+        v = (self.img_height / 2 - y_proj).astype(int)
+        uv = np.stack([u, v], axis=1)        # (M,2)
+
+        if single:
+            # return scalars
+            return uv[0], depths[0]
+        else:
+            return uv, depths
     
     def project_point_to_world(self, pixel_coords, depth, camera_coords_flag=False):
         """
@@ -841,7 +861,7 @@ class Camera():
             proj, depth = self.project_point(pos)
             if proj is None:
                 # If the point is behind the camera, skip drawing.
-                print(f"Skipping frame {i}: Point is behind the camera.")
+                # print(f"Skipping frame {i}: Point is behind the camera.")
                 continue
             u, v = proj
             print(f"Frame {i}: Projected coordinates: ({u}, {v}), Depth: {depth}")
@@ -872,7 +892,7 @@ class Camera():
         Given the ball radius in world coordinates and the depth of the ball in camera coordinates,
         compute the projected radius in pixels.
         """
-        return int(self.focal_length * (ball_radius_world / depth))
+        return (self.focal_length * (ball_radius_world / depth)).astype(int)
     
     def get_depth(self, ball_radius_world, radius_pixels):
         """

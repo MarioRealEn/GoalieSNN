@@ -288,82 +288,73 @@ class CA3DKF_withKnownAz:
 
 class ThrowKF:
     """
-    6D KF in 3D with KNOWN a_z = -9.8 (free‐fall):
-      state = [x, y, z, vx, vy, vz]^T.
-      control u_k = a_z = -9.8 each step.
-    Measurement: [x, y, z].
+    6D Kalman Filter in 3D with KNOWN vertical acceleration a_z = -9.8.
+
+    State = [x, y, z, vx, vy, vz]^T
+    Measurement = [x, y, z]^T
     """
-    def __init__(self, dt, process_var_vel, meas_var_pos,
-                 initial_state=None, initial_covariance=1e3):
-        """
-        dt               : time step (seconds or frames).
-        process_var_vel  : variance on v_x, v_y, v_z.
-        meas_var_pos     : variance on x,y,z measurements.
-        initial_state    : optional 6×1 array [x,y,z,vx,vy,vz].
-        initial_covariance: scalar to initialize P = I * initial_covariance.
-        """
+
+    def __init__(self, dt, process_var_vel, meas_var_pos, initial_cov=1e3):
         self.dt = dt
         self.dim_x = 6
         self.dim_z = 3
 
         # 1) State vector x (6×1)
         self.x = np.zeros((6,1))
-        if initial_state is not None:
-            self.x = initial_state.reshape((6,1))
 
         # 2) Covariance P (6×6)
-        self.P = np.eye(self.dim_x) * initial_covariance
+        self.P = np.eye(self.dim_x) * initial_cov
 
-        # 3) F (6×6): same constant‐velocity block (no accel in state)
+        # 3) F (6×6): constant‐velocity block
         F = np.zeros((6,6))
         for i in range(3):
-            F[i,   i]     = 1
-            F[i,   3+i]   = dt
-            F[3+i, 3+i]   = 1
+            F[i,   i]   = 1
+            F[i,   3+i] = dt
+            F[3+i, 3+i] = 1
         self.F = F
 
-        # 4) B (6×1) maps the KNOWN a_z into Δz, Δv_z
+        # 4) B (6×1) maps a_z into Δz, Δv_z
         self.B = np.array([
-            [0.0],             # no direct Δx from a_z
-            [0.0],             # no direct Δy from a_z
-            [0.5 * dt**2],     # Δz = ½·a_z·dt²
-            [0.0],             # no Δvx from a_z
-            [0.0],             # no Δv_y from a_z
-            [dt]               # Δv_z = a_z·dt
+            [0.0],
+            [0.0],
+            [0.5 * dt**2],
+            [0.0],
+            [0.0],
+            [dt]
         ])
 
-        # 5) H (3×6): measure x,y,z
+        # 5) H (3×6): measure (x,y,z)
         H = np.zeros((3,6))
         H[0,0] = 1
         H[1,1] = 1
         H[2,2] = 1
         self.H = H
 
-        # 6) Q (6×6): process noise on velocities
+        # 6) Q (6×6): process noise on vx, vy, vz
         Q = np.zeros((6,6))
         Q[3,3] = process_var_vel
         Q[4,4] = process_var_vel
         Q[5,5] = process_var_vel
         self.Q = Q
 
-        # 7) R (3×3): measurement noise on x,y,z
-        self.R = np.eye(3) * meas_var_pos
+        # 7) R (3×3): measurement noise on (x,y,z)
+        if isinstance(meas_var_pos, np.ndarray) and meas_var_pos.shape == (3, 3):
+            self.R = meas_var_pos
+        else:
+            self.R = np.eye(3) * meas_var_pos
 
-        # 8) We’ll always pass u = -9.8 for free‐fall
+        # 8) We’ll always use u = -9.8  (gravity)
         self.u_const = -9.8
 
     def predict(self, u=None):
         """
-        Predict step with known vertical acceleration u_k.
-        If u is None, we default to -9.8.
+        Predict step with known vertical acceleration u_k (default = -9.8).
+        x_{k+1} = F x_k + B u_k,   P_{k+1} = F P F^T + Q
         """
         if u is None:
             u = self.u_const
 
-        # State‐predict
         self.x = (self.F @ self.x) + (self.B * u)
-
-        # Covariance‐predict
         self.P = self.F @ self.P @ self.F.T + self.Q
 
     def update(self, z):
@@ -449,9 +440,12 @@ class RollKF:
         self.Q = Q
 
         # 7) R (3×3): measurement noise on (x,y,z)
-        self.R = np.eye(3) * meas_var_pos
+        if isinstance(meas_var_pos, np.ndarray) and meas_var_pos.shape == (3, 3):
+            self.R = meas_var_pos
+        else:
+            self.R = np.eye(3) * meas_var_pos
 
-    def predict(self):
+    def predict(self, u = None):
         """
         Predict step:
           x_{k+1|k} = F x_{k|k}
@@ -502,3 +496,109 @@ class RollKF:
         # Zero out covariances involving vz:
         self.P[5, :] = 0
         self.P[:, 5] = 0
+
+
+class IMM_KF:
+    def __init__(self, model_filters, trans_matrix, mu_init):
+        """
+        IMM wrapper for M sub‐filters.
+
+        Args:
+          model_filters: list of M Kalman‐filter‐like objects, each having:
+                         .x, .P, .F, .H, .Q, .R, .predict(u), .update(z)
+          trans_matrix : M×M array where trans_matrix[j,i] = P(model_i at k | model_j at k-1)
+          mu_init      : length‐M array of initial model probabilities (must sum to 1).
+        """
+        self.models = model_filters
+        self.M = len(model_filters)
+        self.Pij = np.array(trans_matrix)       # shape (M, M)
+        self.mu = np.array(mu_init).astype(float)  # shape (M,)
+        self.dim_x = self.models[0].dim_x
+        self.dim_z = self.models[0].dim_z
+
+    def mix_probabilities(self):
+        mu_prev = self.mu.copy()  # shape (M,)
+        c = np.zeros(self.M)
+        for i in range(self.M):
+            c[i] = np.sum(mu_prev * self.Pij[:, i])
+
+        mix_w = np.zeros((self.M, self.M))  # mix_w[j,i]
+        for i in range(self.M):
+            for j in range(self.M):
+                if c[i] > 0:
+                    mix_w[j, i] = (mu_prev[j] * self.Pij[j, i]) / c[i]
+                else:
+                    mix_w[j, i] = 0
+
+        mixed_states = []
+        mixed_covs = []
+        for i in range(self.M):
+            x0_i = np.zeros((self.dim_x, 1))
+            for j in range(self.M):
+                x0_i += mix_w[j, i] * self.models[j].x
+
+            P0_i = np.zeros((self.dim_x, self.dim_x))
+            for j in range(self.M):
+                dx = (self.models[j].x - x0_i)
+                P0_i += mix_w[j, i] * (self.models[j].P + dx @ dx.T)
+
+            mixed_states.append(x0_i)
+            mixed_covs.append(P0_i)
+
+        return mixed_states, mixed_covs
+
+    def predict(self, controls):
+        mixed_states, mixed_covs = self.mix_probabilities()
+        for i in range(self.M):
+            self.models[i].x = mixed_states[i]
+            self.models[i].P = mixed_covs[i]
+            # Each sub‐filter now does its own predict(u_i):
+            self.models[i].predict(u=controls[i])
+
+    def update(self, z):
+        likelihoods = np.zeros(self.M)
+
+        for i in range(self.M):
+            x_pred = self.models[i].x.copy()
+            P_pred = self.models[i].P.copy()
+
+            z_vec = z.reshape((self.dim_z, 1))
+            y = z_vec - (self.models[i].H @ x_pred)
+            S = self.models[i].H @ P_pred @ self.models[i].H.T + self.models[i].R
+
+            detS = np.linalg.det(S)
+            if detS <= 0:
+                likelihoods[i] = 0.0
+            else:
+                invS = np.linalg.inv(S)
+                exponent = -0.5 * (y.T @ invS @ y).item()
+                denom = np.sqrt((2*np.pi)**self.dim_z * detS)
+                likelihoods[i] = np.exp(exponent) / denom
+
+            K = P_pred @ self.models[i].H.T @ np.linalg.inv(S)
+            self.models[i].x = x_pred + (K @ y)
+            I = np.eye(self.dim_x)
+            self.models[i].P = (I - K @ self.models[i].H) @ P_pred
+
+        mu_pred = np.zeros(self.M)
+        for i in range(self.M):
+            mu_pred[i] = np.sum(self.mu * self.Pij[:, i])
+
+        mu_post_unnorm = likelihoods * mu_pred
+        total = np.sum(mu_post_unnorm)
+        if total > 0:
+            self.mu = mu_post_unnorm / total
+        else:
+            self.mu = mu_pred / np.sum(mu_pred)
+
+    def fused_state(self):
+        x_fuse = np.zeros((self.dim_x, 1))
+        for i in range(self.M):
+            x_fuse += self.mu[i] * self.models[i].x
+
+        P_fuse = np.zeros((self.dim_x, self.dim_x))
+        for i in range(self.M):
+            dx = self.models[i].x - x_fuse
+            P_fuse += self.mu[i] * (self.models[i].P + dx @ dx.T)
+
+        return x_fuse, P_fuse
