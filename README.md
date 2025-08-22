@@ -19,16 +19,16 @@ As long as these are installed, the rest of the Python packages are straightforw
 
 ## Repository Contents
 
-- **Notebooks**  
+**Notebooks**  
   Most notebooks document the development process. They are not fully organized and may require minor adjustments.  
 
-- **Tutorial**  
+**Tutorial**  
   The main entry point. It demonstrates how to:  
   - Train the best-performing model  
   - Integrate it with a Kalman Filter (KF)  
   - Evaluate the results
 
-- **Utils**  
+**Utils**  
   Contains the main scripts used throughout the project:  
   - `data.py` → dataset classes for event data  
   - `simulator.py` → camera, field, and trajectory generator classes, plus dataset generation functions  
@@ -39,7 +39,7 @@ As long as these are installed, the rest of the Python packages are straightforw
 
 ## Notes
 
-- **Old notebooks**  
+**Old notebooks**  
   Re-running some older notebooks may result in errors. This is usually due to the refactoring that moved:  
   - datasets → `data/`  
   - main scripts → `utils/`  
@@ -47,7 +47,7 @@ As long as these are installed, the rest of the Python packages are straightforw
   If you encounter issues, updating the file paths in the code should fix them.  
   (The **Tutorial** notebook has already been tested and works.)
 
-- **Custom datasets**  
+**Custom datasets**  
   Creating your own dataset requires additional tools:  
   - A combination of custom environments  
   - Metavision’s code  
