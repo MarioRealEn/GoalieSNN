@@ -11,6 +11,18 @@ import utils.data as dt
 CAMERA = DEFAULT_CAMERA
 FIELD = DEFAULT_FIELD
 
+# Values for the Kalman Filters
+DELTA_T = 0.01
+PROCESS_VAR_VEL_XY = 0.1
+PROCESS_VAR_VEL_Z  = 0.1
+MEAS_VAR_POS       = 0.9
+
+# Values for the majority voting regime
+Z_FLOOR = 0.1
+MARGIN = 0.15 # margin for hysteresis
+T_DOWN  = Z_FLOOR - MARGIN
+T_UP    = Z_FLOOR + MARGIN
+
 class CA3DKalmanFilter:
     def __init__(self, dt, process_var_acc, meas_var_pos = None,
                  initial_state=None, initial_covariance=1e3):
@@ -660,10 +672,6 @@ def project_to_camera(world_pos, dataset, camera = CAMERA):
     out = np.stack([u, v, r], axis=-1)
     return out
     
-delta_t = 0.01
-process_var_vel_xy = 0.1
-process_var_vel_z  = 0.1
-meas_var_pos       = 0.5
 
 def kalman_loop_out_of_fov(kf, pred_pos, truth_pos, last_measurement_ts = None):
     positions = []
@@ -801,11 +809,6 @@ def print_kf_graph(positions, truth_positions, pred_pos, truth_labels, last_meas
     plt.show()
 
 
-z_floor = 0.1
-margin = 0.15 # margin for hysteresis
-T_down  = z_floor - margin
-T_up    = z_floor + margin
-
 def majority_regime(pred_pos, last_measurement_ts = None, delta_t=0.01,
                     pv_xy=0.1, pv_z=0.1, mv=0.5):
     """
@@ -842,9 +845,9 @@ def majority_regime(pred_pos, last_measurement_ts = None, delta_t=0.01,
         roll_kf.update(meas)
 
         # hysteresis
-        if regime == 'throw' and z_meas < T_down:
+        if regime == 'throw' and z_meas < T_DOWN:
             regime = 'roll'
-        elif regime == 'roll' and z_meas > T_up:
+        elif regime == 'roll' and z_meas > T_UP:
             regime = 'throw'
 
         votes.append(regime)
@@ -859,10 +862,6 @@ def majority_regime(pred_pos, last_measurement_ts = None, delta_t=0.01,
     # print(f"Votes: {rolls} rolls, {throws} throws")
     return (roll_kf, positions_roll, 'roll') if rolls > throws else (throw_kf, positions_throw, 'throw')
 
-delta_t = 0.01
-process_var_vel_xy = 0.1
-process_var_vel_z  = 0.1
-meas_var_pos       = 0.9
 
 def evaluate_kf(dataloader, dataloader_world, model, device, KFClass = None, cutoff_time = None, cutoff_distance = None, time_pred = None, all_preds=None, check_result='goal'):
     """
@@ -920,7 +919,7 @@ def evaluate_kf(dataloader, dataloader_world, model, device, KFClass = None, cut
         N = len(pred_pos)
 
         if cutoff_type == "time":
-            last_measurement_ts = int(cutoff_time/delta_t)
+            last_measurement_ts = int(cutoff_time/DELTA_T)
             if last_measurement_ts > N:
                 # print(f"Skipping trajectory {tr} due to insufficient measurements.")
                 continue
@@ -947,10 +946,10 @@ def evaluate_kf(dataloader, dataloader_world, model, device, KFClass = None, cut
 
             KFClass = RollKF if pred_regime == 'roll' else ThrowKF
         else:
-            kf_preds = KFClass(delta_t, process_var_vel_xy, meas_var_pos)
+            kf_preds = KFClass(DELTA_T, PROCESS_VAR_VEL_XY, MEAS_VAR_POS)
             kf_preds, kf_pred_positions = kalman_loop_in_fov(kf_preds, pred_pos, gt_labels, last_measurement_ts)
             
-        kf_truth = KFClass(delta_t, process_var_vel_xy, meas_var_pos)
+        kf_truth = KFClass(DELTA_T, PROCESS_VAR_VEL_XY, MEAS_VAR_POS)
 
         kf_truth, truth_positions = kalman_loop_in_fov(kf_truth, gt_labels, gt_labels, last_measurement_ts)
 
@@ -964,7 +963,7 @@ def evaluate_kf(dataloader, dataloader_world, model, device, KFClass = None, cut
                 # print(f"Skipping trajectory {tr} due to insufficient measurements for goal prediction.")
                 continue
         elif check_result == 'time':
-            timesteps_pred = int(time_pred / delta_t)
+            timesteps_pred = int(time_pred / DELTA_T)
             # print(f"Predicting until {timesteps_pred} timesteps after the last measurement.")
             # print(f"Last measurement timestamp: {last_measurement_ts}, Total timesteps: {last_measurement_ts + timesteps_pred}")
             if last_measurement_ts + timesteps_pred > len(gt_labels):
@@ -1000,8 +999,8 @@ def evaluate_kf(dataloader, dataloader_world, model, device, KFClass = None, cut
         # print(f"Position in goal: {position_in_goal}, Truth in goal: {truth_in_goal}")
         
         # Add the timestamp to the final positions
-        final_prediction = np.append(final_prediction, len(kf_pred_positions)*delta_t)
-        final_true_position = np.append(final_true_position, len(truth_positions)*delta_t)
+        final_prediction = np.append(final_prediction, len(kf_pred_positions)*DELTA_T)
+        final_true_position = np.append(final_true_position, len(truth_positions)*DELTA_T)
 
         diffs.append([abs(final_prediction[k] - final_true_position[k]) for k in range(len(final_prediction))])
         # diffs.append([final_prediction[k] - final_true_position[k] for k in range(len(final_prediction))])
@@ -1078,7 +1077,7 @@ def print_kf(dataloader, dataloader_world, model, device, KFClass = None, cutoff
         N = len(pred_pos)
 
         if cutoff_type == "time":
-            last_measurement_ts = int(cutoff_time/delta_t)
+            last_measurement_ts = int(cutoff_time/DELTA_T)
             if last_measurement_ts > N:
                 # print(f"Skipping trajectory {tr} due to insufficient measurements.")
                 continue
@@ -1105,10 +1104,10 @@ def print_kf(dataloader, dataloader_world, model, device, KFClass = None, cutoff
 
             KFClass = RollKF if pred_regime == 'roll' else ThrowKF
         else:
-            kf_preds = KFClass(delta_t, process_var_vel_xy, meas_var_pos)
+            kf_preds = KFClass(DELTA_T, PROCESS_VAR_VEL_XY, MEAS_VAR_POS)
             kf_preds, kf_pred_positions = kalman_loop_in_fov(kf_preds, pred_pos, gt_labels, last_measurement_ts)
             
-        kf_truth = KFClass(delta_t, process_var_vel_xy, meas_var_pos)
+        kf_truth = KFClass(DELTA_T, PROCESS_VAR_VEL_XY, MEAS_VAR_POS)
 
         kf_truth, truth_positions = kalman_loop_in_fov(kf_truth, gt_labels, gt_labels, last_measurement_ts)
 
@@ -1122,7 +1121,7 @@ def print_kf(dataloader, dataloader_world, model, device, KFClass = None, cutoff
                 # print(f"Skipping trajectory {tr} due to insufficient measurements for goal prediction.")
                 continue
         elif check_result == 'time':
-            timesteps_pred = int(time_pred / delta_t)
+            timesteps_pred = int(time_pred / DELTA_T)
             # print(f"Predicting until {timesteps_pred} timesteps after the last measurement.")
             # print(f"Last measurement timestamp: {last_measurement_ts}, Total timesteps: {last_measurement_ts + timesteps_pred}")
             if last_measurement_ts + timesteps_pred > len(gt_labels):
