@@ -1,0 +1,31 @@
+EXPERIMENTS
+
+
+Architecture ball detector:
+	2 layer class and reg
+	3 layer class and reg
+	comparison 10ts and 20 ts
+	
+	values
+		accuracy for 10 ts and 20 ts
+
+
+Error vs ts:
+	3 layer class
+	
+
+Results 3d ball tracker
+
+
+
+
+
+
+In the end I want to show these variables dependence on distance and time looking at the ball
+
+
+Flight vs Roll accuracy
+Avg distance in x
+Accuracy on in vs out vs almost in
+
+		

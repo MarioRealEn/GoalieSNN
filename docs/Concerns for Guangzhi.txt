@@ -1,0 +1,21 @@
+Dataset
+	My approach: goes-in, goes-out, almost-goes-in
+	Is the shadow a big problem?
+
+Architecture
+	SCNN
+	Learn betas and thresholds?
+	Classification into regression
+	Inference speed
+	Leverage event data: accumulation, timesteps,...
+	ROI?
+		with dynamic sizing
+		What to do when the ball goes outside the FOV?
+	GASP
+
+
+
+Model distillation
+quantization
+
+	
