@@ -1097,7 +1097,7 @@ class SCNNVideoRegression(nn.Module): # Based on the SCNN_Tracker3L
         self.flattened_size = self._get_flattened_size(input_shape)
         print(f"Flattened feature size: {self.flattened_size}")
         
-        # Two fully connected branches: one for x-coordinate, one for y-coordinate
+        # One fully connected branch for each coordinate
         self.fc_x = nn.Linear(self.flattened_size, 1)
         self.fc_y = nn.Linear(self.flattened_size, 1)
         self.fc_z = nn.Linear(self.flattened_size, 1)
@@ -1324,6 +1324,176 @@ class CNNVideoClassification(nn.Module):  # Converted from SCNNVideoClassificati
             x = self.act(self.conv1(x_t)); x = self.mp1(x)
             x = self.act(self.conv2(x));   x = self.mp2(x)
             x = self.act(self.conv3(x));   x = self.mp3(x)
+
+            x = x.view(x.size(0), -1)
+            if self.has_dropout:
+                x = self.dropout(x)
+
+            for j, label in enumerate(self.labels):
+                logits = self.fc_layers[label](x)  # [valid_B, n_bins]
+                outputs_seq[j][valid_mask, :, t] = logits
+
+            del x_t, x, logits
+
+        # Maintain the tuple structure used by your training loop
+        return outputs_seq, []
+
+    # --- keep original class methods so your pipeline plugs in unchanged ---
+
+    def start_training(self, trainloader, optimizer, device, loss_function=None,
+                       validationloader=None, num_steps=0, num_epochs=20,
+                       scheduler=None, warmup=None, plot=True, chunk_size=CHUNK_SIZE,
+                       save=[], grad_clip=False):
+        batch_size = trainloader.batch_size
+        if loss_function is None:
+            if self.weighted_avg:
+                loss_function = regression_loss
+            else:
+                loss_function = classification_loss
+
+        if num_steps != 0:
+            print(f"Warning: num_steps={num_steps} is ignored for CNNVideoClassification. ")
+
+        self.training_params = {
+            "type": self.name,
+            "batch_size": batch_size,
+            "num_steps": num_steps,
+            "loss_function": loss_function.__name__,
+            "optimizer": optimizer,
+            "learning_rate": optimizer.param_groups[0]['lr'],
+            "num_epochs": 0,
+            "quantization": trainloader.dataset.quantization,
+            "label_quantization": trainloader.dataset.label_quantization,
+            "beta": self.beta,
+            "learn_threshold": self.learn_threshold,
+            "image_shape": self.image_shape,
+            "weighted_avg": self.weighted_avg,
+            "epoch_losses": [],
+            "validation_errors": [],
+            "validation_losses": [],
+        }
+        
+        print(chunk_size)
+
+        training_loop_videos(
+            self, trainloader, optimizer, device, loss_function,
+            validationloader, num_steps, num_epochs,
+            scheduler=scheduler, warmup=warmup, plot=plot,
+            save=save, chunk_size=chunk_size, grad_clip=grad_clip
+        )
+
+    def evaluate(self, testloader, device, num_steps, print_results=False,
+                 operation='mean', weighted_avg=None, chunk_size=CHUNK_SIZE):
+        if weighted_avg is None:
+            weighted_avg = getattr(self, "weighted_avg", False)
+        # Reuse your existing evaluators unchanged
+        return (
+            evaluate_video_regression_tracker(self, testloader, device, num_steps,
+                                              print_results, operation, weighted_avg=weighted_avg)
+            if weighted_avg else
+            evaluate_video_classification_tracker(self, testloader, device, num_steps,
+                                                  print_results, operation, chunk_size=chunk_size)
+        )
+
+
+
+class CNN4LVideoClassification(nn.Module):  # Converted from SCNNVideoClassification
+    def __init__(self, trainset, beta=0.8, learn_threshold=False, weighted_avg=False, dropout=False):
+        """
+        Keeps the same constructor signature and public attributes so the rest of your code
+        (training loop, evaluators, losses) can remain unchanged.
+        """
+        super(CNN4LVideoClassification, self).__init__()
+
+        self.name = 'CNNVideoClassification'
+        self.task = 'classification'
+        self.beta = beta                      # kept for API compatibility (unused)
+        self.learn_threshold = learn_threshold  # kept for API compatibility (unused)
+        self.image_shape = trainset.image_shape
+        self.bins_factor = trainset.quantization / trainset.label_quantization
+        self.weighted_avg = weighted_avg
+        self.g = 9.81
+        self.dt = 0.01
+
+        self.max_values = {
+            'x_cam': int(self.image_shape[2] * self.bins_factor) + 1,
+            'y_cam': MAX_VAL_Y_CAM // trainset.label_quantization + 1,
+            'R_cam': MAX_VAL_R_CAM // trainset.label_quantization + 1,
+            'in_fov': 1,
+            'X': int(self.image_shape[2] * self.bins_factor) + 1,
+            'Y': int(self.image_shape[1] * self.bins_factor) + 1,
+            'Radius': MAX_VAL_R_CAM // trainset.label_quantization + 1,
+        }
+        self.n_bins = np.ones(len(trainset.labels), dtype=int)
+        self.labels = trainset.labels
+
+        # Backbone: same geometry as SCNN (conv→pool x3), but with standard activations
+        channels, H, W = self.image_shape
+        input_shape = (channels, H, W)
+
+        self.conv1 = nn.Conv2d(2, 16, kernel_size=5, stride=1, padding=2)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
+        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
+        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
+
+        self.act = nn.ReLU(inplace=True)
+        self.mp1 = nn.MaxPool2d(2)
+        self.mp2 = nn.MaxPool2d(2)
+        self.mp3 = nn.MaxPool2d(2)
+        self.mp4 = nn.MaxPool2d(2)
+
+        self.has_dropout = dropout
+        if self.has_dropout:
+            self.dropout = nn.Dropout(p=0.5)
+
+        # Compute flattened size via dummy forward (same approach as original)
+        self.flattened_size = self._get_flattened_size(input_shape)
+        print(f"Flattened feature size: {self.flattened_size}")
+
+        # One linear head per label (same as original)
+        self.fc_layers = nn.ModuleDict()
+        for i, label in enumerate(trainset.labels):
+            n_bins = self.max_values[label]
+            self.n_bins[i] = n_bins
+            self.fc_layers[label] = nn.Linear(self.flattened_size, n_bins)
+            print(f"Number of {label} bins: {n_bins}")
+
+    def _get_flattened_size(self, input_shape):
+        with torch.no_grad():
+            x = torch.zeros(1, *input_shape)
+            x = self.act(self.conv1(x)); x = self.mp1(x)
+            x = self.act(self.conv2(x)); x = self.mp2(x)
+            x = self.act(self.conv3(x)); x = self.mp3(x)
+            x = self.act(self.conv4(x)); x = self.mp4(x)
+            return x.view(1, -1).size(1)
+
+    def forward(self, sequences_lengths, membrane_potentials, num_steps_per_image=10):
+        """
+        Returns:
+          outputs_seq: list of tensors, len = n_labels, each [B, n_bins(label), T_max]
+          membrane_potentials: []  (empty; CNN is stateless)
+        Signature and shapes match the SCNN version so losses/eval keep working.
+        """
+        padded_x, lengths = sequences_lengths
+        device = padded_x.device
+        batch_size, max_seq_len = padded_x.shape[:2]
+
+        # Preallocate per-label outputs across time
+        outputs_seq = [torch.zeros(batch_size, self.n_bins[i], max_seq_len, device=device)
+                       for i in range(len(self.labels))]
+
+        for t in range(max_seq_len):
+            valid_mask = (t < lengths).to(device)
+            if valid_mask.sum() == 0:
+                break
+
+            x_t = padded_x[valid_mask, t]  # [valid_B, C, H, W]
+
+            # Single-pass CNN (no spiking loop)
+            x = self.act(self.conv1(x_t)); x = self.mp1(x)
+            x = self.act(self.conv2(x));   x = self.mp2(x)
+            x = self.act(self.conv3(x));   x = self.mp3(x)
+            x = self.act(self.conv4(x));   x = self.mp4(x)
 
             x = x.view(x.size(0), -1)
             if self.has_dropout:
@@ -1883,9 +2053,11 @@ def logits_to_weighted_avg(logits):
     return weighted_vars
 
 
-def plot_error_distribution(errors, n_bins=30, fields=['x', 'y', 'R']):
-    # Define bins over [-60, 60]
-    bins = np.linspace(-60, 60, n_bins + 1)
+def plot_error_distribution(errors, n_bins=31, fields=['x', 'y', 'R']):
+    # Define bins over [-25, 25]
+    bins = np.linspace(-25, 25, n_bins + 1)
+    # Define bins over [0, 60]
+    # bins = np.linspace(0, 60, n_bins + 1)
     
     # Colors for each field
     colors = ['C0', 'C1', 'C2']
@@ -1896,8 +2068,10 @@ def plot_error_distribution(errors, n_bins=30, fields=['x', 'y', 'R']):
     z_score = norm.ppf((1 + confidence_level) / 2)   # two‐sided
     
     # X‐axis values for full Gaussian curve
-    x_vals = np.linspace(-60, 60, 1000)
-    
+    x_vals = np.linspace(-25, 25, 1000)
+    # X‐axis values for half Gaussian curve
+    # x_vals = np.linspace(0, 25, 1000)
+
     for i, errs in enumerate(errors):
         mu, std = norm.fit(errs)
         ci_low  = mu - z_score * std
@@ -2236,12 +2410,12 @@ def save_model(model, path = None):
 def save_best_model(model_type, testloader, device, evaluate = True):
     print("Loading best model...")
     best_model = load_model('models/best_model_current_training.pt', model_type, testloader.dataset, device = device)
+    save_model(best_model)
     if evaluate:
         print("Best model evaluation...")
         error = best_model.evaluate(testloader, device, num_steps=best_model.training_params['num_steps'], print_results=True)
         error_norm = np.linalg.norm(error).item()
         print(f"Best model error: {error_norm}")
-    save_model(best_model)
 
 def measure_inference_time_per_image(model, dataloader, device, num_steps=10, num_batches=10):
     """
@@ -2411,6 +2585,7 @@ def load_model(path, model_class, trainset, device):
         model = model_class(trainset, weighted_avg=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.training_params = checkpoint['training_params']
+    model.name = model.training_params['type']
     model.to(device)
     return model
 

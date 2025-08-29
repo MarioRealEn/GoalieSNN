@@ -6,7 +6,7 @@
 2. Extract it into the root folder of your workspace.  
 
 ### Dependencies
-Python version: 3.9. This project targets the following core versions (GPU builds):
+Python version: **3.9**. This project targets the following core versions (GPU builds):
 
 - PyTorch **2.5.1**
 - Torchvision **0.20.1**

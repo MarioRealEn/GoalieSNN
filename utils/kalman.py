@@ -15,7 +15,7 @@ FIELD = DEFAULT_FIELD
 DELTA_T = 0.01
 PROCESS_VAR_VEL_XY = 0.1
 PROCESS_VAR_VEL_Z  = 0.1
-MEAS_VAR_POS       = 0.9
+MEAS_VAR_POS       = 0.5
 
 # Values for the majority voting regime
 Z_FLOOR = 0.1
@@ -1144,6 +1144,147 @@ def print_kf(dataloader, dataloader_world, model, device, KFClass = None, cutoff
             last_measurement_ts, show_ground_truth=ground_truth, identifier=identifier
         )
         print(f"Video saved to {video_path}")
+
+def iter_kf_results(
+    dataloader, dataloader_world, model, device,
+    KFClass=None, cutoff_time=None, cutoff_distance=None,
+    time_pred=None, all_preds=None, check_result='goal',
+    ground_truth=False
+):
+    """
+    Generator that yields one result per valid trajectory.
+    Each yield returns a dict with everything needed to plot or export video.
+    """
+
+    if cutoff_time is None and cutoff_distance is None:
+        print("No cutoff specified, looking at all positions.")
+        cutoff_type = None
+    elif cutoff_time is not None and cutoff_distance is not None:
+        raise ValueError("Specify either cutoff_time or cutoff_distance, not both.")
+    elif cutoff_time is not None:
+        print(f"Using cutoff time: {cutoff_time} seconds.")
+        cutoff_type = 'time'
+    else:
+        print(f"Using cutoff distance: {cutoff_distance} meters.")
+        cutoff_type = 'distance'
+    
+    if check_result == 'time':
+        if time_pred is None:
+            raise ValueError("If check_result is 'time', time_pred must be specified.")
+        else:
+            print(f"Using time prediction: {time_pred} seconds.")
+    elif check_result == 'goal':
+        if time_pred is not None:
+            print("WARNING: time_pred is ignored when check_result is 'goal'.")
+        else:
+            print("Using goal prediction.")
+    else:
+        raise ValueError("check_result must be either 'goal' or 'time'.")
+
+    dataset = dataloader.dataset
+    n_items = len(dataset)
+
+    # precompute model preds once if not provided
+    if all_preds is None:
+        all_preds = network.get_preds_all_videos(model, dataloader, device=device, num_steps=10)
+
+    for idx in range(n_items):
+        # ---- fetch data ----
+        video, labels, length = dataset.__getitem__(idx)
+        tr = dataset.__gettr__(idx)
+
+        preds = all_preds[idx]
+        labels = labels.transpose(0, 1)
+
+        # world GT for same trajectory
+        _, gt_labels, _ = dataloader_world.dataset.__getitemtr__(tr)
+        gt_labels = gt_labels.cpu().numpy()
+
+        pred_pos, _ = project_to_world(preds, dataset)  # measurements in world
+        N = len(pred_pos)
+
+        # ---- determine last_measurement_ts based on cutoff ----
+        if cutoff_type == "time":
+            last_measurement_ts = int(cutoff_time / DELTA_T)
+            if last_measurement_ts > N:
+                continue  # insufficient measurements
+        elif cutoff_type == "distance":
+            y_positions = gt_labels[:, 1]
+            excluded_preds = np.where(y_positions < cutoff_distance)
+            if len(excluded_preds[0]) == N - 1:
+                continue  # nothing within cutoff
+            elif len(excluded_preds[0]) == 0:
+                last_measurement_ts = N
+            else:
+                last_measurement_ts = excluded_preds[0][0]
+        else:
+            # no cutoff: use all available measurements
+            last_measurement_ts = N
+
+        # ---- Kalman filters for predicted measurements ----
+        if KFClass is None:
+            kf_preds, kf_pred_positions, pred_regime = majority_regime(pred_pos, last_measurement_ts=last_measurement_ts)
+            KFClass_local = RollKF if pred_regime == 'roll' else ThrowKF
+        else:
+            KFClass_local = KFClass
+            kf_preds = KFClass_local(DELTA_T, PROCESS_VAR_VEL_XY, MEAS_VAR_POS)
+            kf_preds, kf_pred_positions = kalman_loop_in_fov(kf_preds, pred_pos, gt_labels, last_measurement_ts)
+
+        # ---- Kalman filter driven by GT (reference trajectory) ----
+        kf_truth = KFClass_local(DELTA_T, PROCESS_VAR_VEL_XY, MEAS_VAR_POS)
+        kf_truth, truth_positions = kalman_loop_in_fov(kf_truth, gt_labels, gt_labels, last_measurement_ts)
+
+        # ---- extend to goal or to fixed time horizon ----
+        if check_result == 'goal':
+            kf_preds, kf_pred_positions = predict_until_goal(kf_preds, kf_pred_positions)
+            kf_truth, truth_positions = predict_until_goal(kf_truth, truth_positions)
+            if kf_pred_positions is None or truth_positions is None:
+                continue  # not enough info to make a goal prediction
+        else:  # check_result == 'time'
+            timesteps_pred = int(time_pred / DELTA_T)
+            if last_measurement_ts + timesteps_pred > len(gt_labels):
+                continue
+            kf_preds, kf_pred_positions = predict_until_time(kf_preds, kf_pred_positions, timesteps_pred)
+            kf_truth, truth_positions = predict_until_time(kf_truth, truth_positions, timesteps_pred)
+
+        # ---- package results ----
+        result = {
+            "idx": idx,
+            "tr": tr,
+            "video": video,
+            "labels": labels,
+            "preds_logits_or_raw": preds,  # keep raw preds if you need to reproject/inspect
+            "pred_pos": np.array(pred_pos),
+            "gt_labels": gt_labels,
+            "kf_pred_positions": np.array(kf_pred_positions),
+            "truth_positions": np.array(truth_positions),
+            "last_measurement_ts": last_measurement_ts,
+            "ground_truth": ground_truth,
+        }
+
+        yield result
+
+
+# Convenience: plot a single result dict (non-blocking optional)
+def show_kf_result(result, identifier='', gen_video=False):
+    print_kf_graph(
+        result["kf_pred_positions"], result["truth_positions"],
+        result["pred_pos"], result["gt_labels"],
+        result["last_measurement_ts"], ground_truth=result["ground_truth"]
+    )
+    print_kf_3D(
+        result["kf_pred_positions"], result["truth_positions"],
+        result["pred_pos"], result["labels"],
+        result["last_measurement_ts"], ground_truth=result["ground_truth"]
+    )
+    if gen_video:
+        path = gen_kf_video(
+            result["video"], result["kf_pred_positions"],
+            result["truth_positions"], result["preds_logits_or_raw"],
+            result["labels"], result["last_measurement_ts"],
+            show_ground_truth=result["ground_truth"], identifier=identifier
+        )
+        print(f"Video saved to {path}")
 
 def print_kf_3D(kf_pred_positions, truth_positions, pred_pos, gt_labels, last_measurement_ts=None, ground_truth=False):
     fig, ax = FIELD.plot()

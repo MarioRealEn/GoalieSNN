@@ -593,9 +593,11 @@ class Field():
         # and the vertical axis shows the corresponding v0_z (m/s).
         ax.set_xlabel('X (m)')
         ax.set_ylabel('Y (m)')
-        ax.set_zlabel('Z (m)')
+        ax.set_zlabel('Z (m)', labelpad=30)      # push label away from axis
         
         self.set_axes_equal(ax)
+        fig.subplots_adjust(right=0.78)          # smaller -> more empty margin at right
+
         return fig, ax
     
     def set_axes_equal(self, ax, Vmax = 10):
